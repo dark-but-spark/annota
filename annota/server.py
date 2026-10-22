@@ -53,7 +53,14 @@ mcp = FastMCP(
         "确定哪些页面的哪些句子需要标注。\n"
         "  Phase 2 — 定位：只对目标页调用 get_pdf_layout_text 获取精确坐标，"
         "然后用 create_pdf_annotation 写入标注。\n"
-        "  切勿对每一页都调用 get_pdf_layout_text，这会导致上下文溢出。"
+        "  切勿对每一页都调用 get_pdf_layout_text，这会导致上下文溢出。\n\n"
+        "【文字级精确标注】新增词级标注工具：\n"
+        "  - search_text_instances: 搜索特定短语，返回每个匹配的精确坐标\n"
+        "  - extract_word_level_text: 提取页面所有词的独立坐标（比行级更精细）\n"
+        "  - highlight_text_phrase: 最智能的方式，自动处理跨行文本和排版差异\n"
+        "  - create_annotation_direct: 直接用坐标创建标注，无需搜索文本\n"
+        "  推荐：需要标注特定词语时，优先使用 highlight_text_phrase。\n"
+        "  如果已知精确坐标，使用 create_annotation_direct 最快。"
     ),
 )
 
@@ -309,6 +316,239 @@ def batch_annotate(
             "annotations": results,
             "message": f"已创建 {len(results)} 条标注。请重启 Zotero 或按 Ctrl+Shift+R 刷新查看。",
         }, ensure_ascii=False)
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            return json.dumps({
+                "error": "database_locked",
+                "message": "Zotero 数据库被锁定，请先关闭 Zotero 桌面应用再重试。",
+            }, ensure_ascii=False)
+        raise
+
+
+# ── Tool 10: search_text_instances ─────────────────────────────
+
+@mcp.tool()
+def search_text_instances(
+    item_id: str,
+    page_number: int,
+    search_text: str,
+    case_sensitive: bool = False,
+) -> str:
+    """在 PDF 页面中精确搜索文本短语，返回每个匹配的坐标（用于创建标注）。
+
+    这个工具只负责查找和返回坐标，不直接创建标注。
+    配合 create_annotation_direct 使用完成标注。
+
+    工作流：
+    1. 用此工具搜索 → 获得 rects 坐标
+    2. 用 create_annotation_direct → 创建标注
+
+    Args:
+        item_id: Zotero PDF 附件的 itemID（数字），或 PDF 文件的绝对路径
+        page_number: 页码（从 0 开始）
+        search_text: 要搜索的文本短语（如 "deep learning", "结论"）
+        case_sensitive: 是否区分大小写（默认 False）
+
+    Returns:
+        {
+            "matches": [
+                {
+                    "instance": 0,
+                    "rect": [x0, y0, x1, y1],  # 单个矩形（同行文本）
+                    "context": "...surrounding text..."
+                }
+            ]
+        }
+    """
+    pdf_path = _resolve_pdf_path(item_id)
+    result = pdf_tools.search_text_instances(
+        pdf_path, page_number, search_text, case_sensitive
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+# ── Tool 11: highlight_text_phrase ─────────────────────────────
+
+@mcp.tool()
+def highlight_text_phrase(
+    item_id: str,
+    page_number: int,
+    phrase: str,
+    case_sensitive: bool = False,
+) -> str:
+    """智能查找文本短语并返回精确坐标（推荐使用）。
+
+    相比 search_text_instances，这个工具能处理：
+    - 跨行的文本（自动合并同行词为连续矩形）
+    - 多余的空格和换行符
+    - 词间的排版差异
+
+    返回的 rects 格式与 Zotero 手动标注完全一致：
+    - 同行文本 → 1个连续矩形
+    - 跨行文本 → 每行1个矩形
+
+    工作流：
+    1. 用此工具搜索 → 获得 rects 坐标数组
+    2. 用 create_annotation_direct → 创建标注
+
+    使用场景：
+    - "查找 'neural network' 的位置" → 返回所有匹配的坐标
+    - "定位'深度学习'这个词" → 精确定位中文短语
+    - 处理跨行的公式名称、专有名词等
+
+    Args:
+        item_id: Zotero PDF 附件的 itemID（数字），或 PDF 文件的绝对路径
+        page_number: 页码（从 0 开始）
+        phrase: 要查找的文本短语
+        case_sensitive: 是否区分大小写（默认 False）
+
+    Returns:
+        {
+            "matches": [
+                {
+                    "instance": 0,
+                    "rects": [[x0,y0,x1,y1], ...],  # 可能多个矩形（跨行）
+                    "matched_text": "actual text found"
+                }
+            ]
+        }
+    """
+    pdf_path = _resolve_pdf_path(item_id)
+    result = pdf_tools.highlight_text_phrase(
+        pdf_path, page_number, phrase, case_sensitive
+    )
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+# ── Tool 12: extract_word_level_text ───────────────────────────
+
+@mcp.tool()
+def extract_word_level_text(item_id: str, page_number: int) -> str:
+    """提取 PDF 页面的词级文本及坐标（用于自定义匹配逻辑）。
+
+    返回页面上每个单词的独立坐标，适合需要自定义匹配逻辑的场景。
+    比如：标注所有大写缩写词、特定模式的文本等。
+
+    工作流：
+    1. 用此工具获取所有词的坐标
+    2. 自己筛选需要标注的词
+    3. 用 create_annotation_direct 创建标注
+
+    Args:
+        item_id: Zotero PDF 附件的 itemID（数字），或 PDF 文件的绝对路径
+        page_number: 页码（从 0 开始）
+
+    Returns:
+        {
+            "words": [
+                {
+                    "text": "word",
+                    "rect": [x0, y0, x1, y1],
+                    "block_no": 0,
+                    "line_no": 0,
+                    "word_no": 0
+                }
+            ]
+        }
+    """
+    pdf_path = _resolve_pdf_path(item_id)
+    result = pdf_tools.extract_word_level_text(pdf_path, page_number)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+# ── Tool 13: create_annotation_direct ──────────────────────────
+
+@mcp.tool()
+def create_annotation_direct(
+    item_id: str,
+    page_index: int,
+    rects: list[list[float]],
+    text: str,
+    color: str = "#ffd400",
+    comment: str = "",
+    type: str = "highlight",
+) -> str:
+    """直接创建标注 - 使用精确坐标，与 Zotero 手动标注完全一致。
+
+    这是所有标注工具的最终写入接口。
+    其他工具（search_text_instances, highlight_text_phrase）负责查找坐标，
+    这个工具负责将坐标写入 Zotero 数据库。
+
+    坐标格式说明：
+    - 单行文本：rects = [[x0, y0, x1, y1]]（1个矩形）
+    - 跨行文本：rects = [[...], [...], [...]]（每行1个矩形）
+    - 使用 Zotero 坐标系（左下角原点，Y轴向上）
+
+    示例 1 - 标注标题（跨两行，绿色高亮）：
+    ```
+    create_annotation_direct(
+        item_id="path/to/paper.pdf",
+        page_index=0,
+        rects=[
+            [74.0, 715.4, 538.0, 731.0],    # 第一行
+            [226.5, 687.5, 385.5, 703.1]    # 第二行
+        ],
+        text="DDPOPlace: Reinforcement-Learned Diffusion...",
+        color="#5fb236",
+        type="highlight"
+    )
+    ```
+
+    示例 2 - 标注作者（单行，红色下划线）：
+    ```
+    create_annotation_direct(
+        item_id="path/to/paper.pdf",
+        page_index=0,
+        rects=[[109.2, 665.7, 502.8, 675.4]],
+        text="Junqi Chen, Haotian Wang...",
+        color="#ff6666",
+        type="underline"
+    )
+    ```
+
+    Args:
+        item_id: Zotero PDF 附件的 itemID（数字），或 PDF 文件的绝对路径
+        page_index: 页码（从 0 开始）
+        rects: 矩形坐标数组 [[x0,y0,x1,y1], ...]
+               - 同行连续文本：1个矩形覆盖整个文本范围
+               - 跨行文本：每行1个矩形
+        text: 被标注的文本内容
+        color: 十六进制颜色
+               - "#ffd400" 黄色（默认）
+               - "#28CA42" 绿色
+               - "#2EA8E5" 蓝色
+               - "#ff6666" 红色
+               - "#a28ae5" 紫色
+        comment: 附加评论（可选）
+        type: "highlight"（高亮，默认）或 "underline"（下划线）
+    """
+    try:
+        attachment_id = _resolve_item_id(item_id)
+        pdf_path = _resolve_pdf_path(item_id)
+
+        # 自动获取 page_height
+        page_data = pdf_tools.extract_page_text(pdf_path, page_index)
+        page_height = page_data["page_height"]
+
+        # 创建标注
+        result = zotero_db.create_annotation(
+            parent_attachment_id=attachment_id,
+            page_index=page_index,
+            rects=rects,
+            page_height=page_height,
+            color=color,
+            comment=comment,
+            text=text,
+            ann_type=type,
+        )
+
+        return json.dumps({
+            **result,
+            "message": "标注已创建。请重启 Zotero 或按 Ctrl+Shift+R 刷新查看。",
+            "annotation_type": type,
+            "rects_count": len(rects),
+        }, ensure_ascii=False)
+
     except sqlite3.OperationalError as e:
         if "locked" in str(e).lower():
             return json.dumps({

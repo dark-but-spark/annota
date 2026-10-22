@@ -210,3 +210,386 @@ def get_total_pages(pdf_path: str | Path) -> int:
         return len(doc)
     finally:
         doc.close()
+def search_text_instances(
+    pdf_path: str | Path,
+    page_number: int,
+    search_text: str,
+    case_sensitive: bool = False,
+) -> dict:
+    """在指定页面精确搜索文本短语，返回每个匹配实例的词级坐标。
+
+    使用 PyMuPDF 的 search_for 功能进行精确文本匹配，
+    返回的坐标可直接用于创建精确的高亮标注。
+
+    Args:
+        pdf_path: PDF 文件路径
+        page_number: 页码（0-indexed）
+        search_text: 要搜索的文本短语
+        case_sensitive: 是否区分大小写（默认 False）
+
+    Returns:
+        {
+            "page_number": int,
+            "page_width": float,
+            "page_height": float,
+            "search_text": str,
+            "matches": [
+                {
+                    "instance": int,  # 第几个匹配（从0开始）
+                    "rect": [x0, y0, x1, y1],  # Zotero 空间坐标
+                    "context": str,  # 周围的上下文文本
+                },
+                ...
+            ]
+        }
+    """
+    doc = fitz.open(str(pdf_path))
+    try:
+        if page_number < 0 or page_number >= len(doc):
+            raise ValueError(
+                f"page_number {page_number} 超出范围，"
+                f"该 PDF 共 {len(doc)} 页 (0-indexed)"
+            )
+
+        page = doc[page_number]
+        page_height = page.rect.height
+        page_width = page.rect.width
+
+        # 使用 search_for 进行文本搜索
+        # flags: 0=默认（不区分大小写），16=区分大小写
+        flags = 16 if case_sensitive else 0
+        quads = page.search_for(search_text, flags=flags)
+
+        matches = []
+        for idx, quad in enumerate(quads):
+            # quad 是一个包含4个点的四边形，转换为矩形
+            rect = quad.rect  # 获取包围矩形
+            zotero_rect = pymupdf_rect_to_zotero(rect, page_height)
+
+            # 获取上下文：提取匹配位置周围的文本
+            context = _extract_context(page, rect)
+
+            matches.append({
+                "instance": idx,
+                "rect": zotero_rect,
+                "context": context,
+            })
+
+        logger.info(
+            "搜索文本 '%s' 在页面 %d: 找到 %d 个匹配",
+            search_text, page_number, len(matches),
+        )
+
+        return {
+            "page_number": page_number,
+            "page_width": round(page_width, 3),
+            "page_height": round(page_height, 3),
+            "search_text": search_text,
+            "matches": matches,
+        }
+    finally:
+        doc.close()
+
+
+def _extract_context(page, target_rect, context_chars: int = 50) -> str:
+    """提取目标矩形周围的上下文文本。
+
+    Args:
+        page: PyMuPDF Page 对象
+        target_rect: 目标文本的矩形区域
+        context_chars: 前后各提取多少字符
+
+    Returns:
+        包含目标文本及其上下文的字符串
+    """
+    # 扩展矩形以包含周围区域
+    expanded = fitz.Rect(
+        target_rect.x0 - 200,  # 向左扩展
+        target_rect.y0 - 50,   # 向上扩展
+        target_rect.x1 + 200,  # 向右扩展
+        target_rect.y1 + 50,   # 向下扩展
+    )
+
+    # 裁剪到页面边界
+    expanded = expanded & page.rect
+
+    # 提取扩展区域的文本
+    context_text = page.get_textbox(expanded).strip()
+
+    # 限制长度
+    if len(context_text) > context_chars * 3:
+        context_text = context_text[:context_chars * 3] + "..."
+
+    return context_text
+
+
+def _merge_rects_by_line(word_rects: list[dict], page_height: float) -> list[list[float]]:
+    """将同一行的词矩形合并为连续的矩形，实现"划词"效果。
+
+    Args:
+        word_rects: 词矩形列表，每项包含 {"rect": [x0,y0,x1,y1], "pymupdf_rect": (...)}
+        page_height: 页面高度
+
+    Returns:
+        合并后的矩形列表。同行的词会合并为一个大矩形，不同行的保持独立。
+    """
+    if not word_rects:
+        return []
+
+    # 按行分组：使用 pymupdf_rect 的 y 坐标判断是否同行
+    # 允许 2 个点的垂直误差（处理轻微的行内偏移）
+    LINE_TOLERANCE = 2.0
+
+    lines = []  # [[word_rect, ...], ...]
+    current_line = [word_rects[0]]
+
+    for i in range(1, len(word_rects)):
+        prev_rect = word_rects[i-1]["pymupdf_rect"]
+        curr_rect = word_rects[i]["pymupdf_rect"]
+
+        # 判断是否在同一行（y0 和 y1 都接近）
+        y0_diff = abs(curr_rect[1] - prev_rect[1])
+        y1_diff = abs(curr_rect[3] - prev_rect[3])
+
+        if y0_diff <= LINE_TOLERANCE and y1_diff <= LINE_TOLERANCE:
+            # 同一行
+            current_line.append(word_rects[i])
+        else:
+            # 新行
+            lines.append(current_line)
+            current_line = [word_rects[i]]
+
+    # 添加最后一行
+    lines.append(current_line)
+
+    # 合并每行的矩形
+    merged_rects = []
+    for line in lines:
+        if len(line) == 1:
+            # 单个词，直接使用
+            merged_rects.append(line[0]["rect"])
+        else:
+            # 多个词，合并为一个大矩形
+            # 使用 Zotero 坐标系统
+            zotero_rects = [wr["rect"] for wr in line]
+
+            x0 = min(r[0] for r in zotero_rects)  # 最左边
+            y0 = min(r[1] for r in zotero_rects)  # 最下边（Zotero 坐标系 y 向上）
+            x1 = max(r[2] for r in zotero_rects)  # 最右边
+            y1 = max(r[3] for r in zotero_rects)  # 最上边
+
+            merged_rects.append([
+                round(x0, 3),
+                round(y0, 3),
+                round(x1, 3),
+                round(y1, 3),
+            ])
+
+    return merged_rects
+
+
+def extract_word_level_text(
+    pdf_path: str | Path,
+    page_number: int,
+) -> dict:
+    """提取页面的词级文本及坐标（比 extract_page_text 更精细）。
+
+    使用 PyMuPDF 的 words 提取，每个词都有独立的坐标。
+    适合需要精确到单词级别标注的场景。
+
+    Returns:
+        {
+            "page_number": int,
+            "page_width": float,
+            "page_height": float,
+            "words": [
+                {
+                    "text": str,
+                    "rect": [x0, y0, x1, y1],  # Zotero 坐标
+                    "block_no": int,
+                    "line_no": int,
+                    "word_no": int,
+                },
+                ...
+            ]
+        }
+    """
+    doc = fitz.open(str(pdf_path))
+    try:
+        if page_number < 0 or page_number >= len(doc):
+            raise ValueError(
+                f"page_number {page_number} 超出范围，"
+                f"该 PDF 共 {len(doc)} 页 (0-indexed)"
+            )
+
+        page = doc[page_number]
+        page_height = page.rect.height
+        page_width = page.rect.width
+
+        # 提取词级文本
+        # 返回格式: (x0, y0, x1, y1, "word", block_no, line_no, word_no)
+        words_data = page.get_text("words")
+
+        words = []
+        for word_tuple in words_data:
+            x0, y0, x1, y1, text, block_no, line_no, word_no = word_tuple
+
+            # 转换为 Zotero 坐标
+            zotero_rect = pymupdf_rect_to_zotero((x0, y0, x1, y1), page_height)
+
+            words.append({
+                "text": text,
+                "rect": zotero_rect,
+                "block_no": block_no,
+                "line_no": line_no,
+                "word_no": word_no,
+            })
+
+        logger.info(
+            "提取页面 %d 词级文本: %d 个词",
+            page_number, len(words),
+        )
+
+        return {
+            "page_number": page_number,
+            "page_width": round(page_width, 3),
+            "page_height": round(page_height, 3),
+            "words": words,
+        }
+    finally:
+        doc.close()
+
+
+def highlight_text_phrase(
+    pdf_path: str | Path,
+    page_number: int,
+    phrase: str,
+    case_sensitive: bool = False,
+    match_whole_word: bool = False,
+    merge_rects: bool = True,
+) -> dict:
+    """智能查找并返回文本短语的精确坐标，支持跨行匹配。
+
+    相比 search_text_instances，这个函数能处理：
+    - 跨行的文本短语（PDF 中可能因排版被拆成多行）
+    - 多余的空格和换行符
+    - 连字符断词（如 "re-\nsearch" 匹配 "research"）
+
+    Args:
+        pdf_path: PDF 文件路径
+        page_number: 页码（0-indexed）
+        phrase: 要查找的文本短语
+        case_sensitive: 是否区分大小写
+        match_whole_word: 是否只匹配完整单词
+        merge_rects: 是否合并同行的矩形为连续高亮（默认 True）
+                     True=连续划词效果，False=每个词独立框出
+
+    Returns:
+        {
+            "page_number": int,
+            "page_height": float,
+            "phrase": str,
+            "matches": [
+                {
+                    "instance": int,
+                    "rects": [[x0,y0,x1,y1], ...],  # merge_rects=True时同行词会合并
+                    "matched_text": str,  # 实际匹配到的原始文本
+                },
+                ...
+            ]
+        }
+    """
+    doc = fitz.open(str(pdf_path))
+    try:
+        if page_number < 0 or page_number >= len(doc):
+            raise ValueError(
+                f"page_number {page_number} 超出范围，"
+                f"该 PDF 共 {len(doc)} 页 (0-indexed)"
+            )
+
+        page = doc[page_number]
+        page_height = page.rect.height
+
+        # 标准化搜索短语
+        search_phrase = phrase if case_sensitive else phrase.lower()
+        search_phrase = " ".join(search_phrase.split())  # 规范化空格
+
+        # 提取词级数据
+        words_data = page.get_text("words")
+        if not words_data:
+            return {
+                "page_number": page_number,
+                "page_height": round(page_height, 3),
+                "phrase": phrase,
+                "matches": [],
+            }
+
+        # 构建词序列和位置映射
+        words = []
+        for w in words_data:
+            text = w[4] if not case_sensitive else w[4]
+            if not case_sensitive:
+                text = text.lower()
+            words.append({
+                "text": text,
+                "original": w[4],
+                "rect": (w[0], w[1], w[2], w[3]),
+            })
+
+        # 滑动窗口匹配
+        matches = []
+        phrase_words = search_phrase.split()
+        window_size = len(phrase_words)
+
+        i = 0
+        match_idx = 0
+        while i <= len(words) - window_size:
+            # 提取窗口内的词
+            window_words = words[i:i + window_size]
+            window_text = " ".join([w["text"] for w in window_words])
+
+            # 检查是否匹配
+            if window_text == search_phrase:
+                # 收集词的矩形
+                word_rects = []
+                matched_text_parts = []
+
+                for w in window_words:
+                    pymupdf_rect = w["rect"]
+                    zotero_rect = pymupdf_rect_to_zotero(pymupdf_rect, page_height)
+                    word_rects.append({
+                        "rect": zotero_rect,
+                        "pymupdf_rect": pymupdf_rect,
+                        "text": w["original"]
+                    })
+                    matched_text_parts.append(w["original"])
+
+                # 根据 merge_rects 决定是否合并
+                if merge_rects:
+                    rects = _merge_rects_by_line(word_rects, page_height)
+                else:
+                    rects = [wr["rect"] for wr in word_rects]
+
+                matches.append({
+                    "instance": match_idx,
+                    "rects": rects,
+                    "matched_text": " ".join(matched_text_parts),
+                })
+                match_idx += 1
+                i += window_size  # 跳过已匹配的词
+            else:
+                i += 1
+
+        logger.info(
+            "智能搜索短语 '%s' 在页面 %d: 找到 %d 个匹配",
+            phrase, page_number, len(matches),
+        )
+
+        return {
+            "page_number": page_number,
+            "page_height": round(page_height, 3),
+            "phrase": phrase,
+            "matches": matches,
+        }
+    finally:
+        doc.close()

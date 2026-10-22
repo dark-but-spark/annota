@@ -40,7 +40,7 @@ AI reads your papers, highlights key findings, explains formulas, and writes str
 
 ## ✨ Features
 
-### 9 MCP Tools
+### 12 MCP Tools
 
 | Tool | What it does |
 |------|-------------|
@@ -48,11 +48,14 @@ AI reads your papers, highlights key findings, explains formulas, and writes str
 | `list_zotero_items` | Browse recent items |
 | `get_item_metadata` | Get authors, year, venue, DOI |
 | `get_pdf_text_bulk` | Extract full text (no coords, fast) |
-| `get_pdf_layout_text` | Extract text + precise coordinates |
+| `get_pdf_layout_text` | Extract text + precise coordinates (line-level) |
 | `list_annotations` | View existing annotations |
 | `create_pdf_annotation` | Create highlight / underline |
 | `batch_annotate` | Create multiple annotations at once |
 | `add_child_note` | Add a note to any item |
+| 🆕 `search_text_instances` | **Word-level**: Search exact text phrases |
+| 🆕 `extract_word_level_text` | **Word-level**: Extract every word's coordinates |
+| 🆕 `highlight_text_phrase` | **Word-level**: Smart phrase matching (recommended) |
 
 ### 3 Claude Code Skills (Slash Commands)
 
@@ -65,6 +68,7 @@ AI reads your papers, highlights key findings, explains formulas, and writes str
 ### Smart Design
 
 - **Two-phase workflow** — Reads full text first (cheap), then only gets coordinates for target sentences (precise). Reduces context usage by 63–80%.
+- **Word-level precision** 🆕 — New tools for precise word/phrase annotation instead of just line-level highlighting.
 - **Auto-skip references** — Detects "References" section and skips it. A 21-page paper extracts only 13 pages.
 - **Batch annotations** — Creates 10 highlights in 1 API call instead of 10.
 - **Friendly errors** — Write failures return helpful messages instead of crashing.
@@ -268,7 +272,44 @@ Here's what Claude Code looks like when processing a paper:
 
 ---
 
-## 🎨 Color Convention
+### Example 8: Word-Level Precise Annotation 🆕
+
+**Input:**
+```
+精确标注第3页所有 "neural network" 这个词组，用蓝色高亮
+(Precisely highlight all instances of "neural network" on page 3 in blue)
+```
+
+**How it works:**
+```python
+# AI uses the new highlight_text_phrase tool
+result = highlight_text_phrase(pdf, page=3, phrase="neural network")
+
+# Returns exact coordinates for each word
+{
+  "matches": [
+    {
+      "instance": 0,
+      "rects": [[120.5, 650.2, 160.3, 665.8],  # "neural"
+                [162.0, 650.2, 205.6, 665.8]],  # "network"
+      "matched_text": "neural network"
+    }
+  ]
+}
+
+# Creates precise word-level highlights
+batch_annotate(pdf, annotations=[...])
+```
+
+**Result:**
+
+Only the exact phrase "neural network" is highlighted, not the entire line. Works even when the phrase spans multiple lines due to PDF text wrapping.
+
+**Key difference from old approach:**
+- ❌ Old: Highlights entire line → "We propose a **neural network** architecture for..."
+- ✅ New: Highlights only the phrase → "We propose a **neural network** architecture for..."
+
+---
 
 | Color | Code | Use for |
 |-------|------|---------|
