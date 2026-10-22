@@ -27,12 +27,19 @@ if _project_root not in sys.path:
 
 import json
 import logging
+import math
 import sqlite3
 
 from mcp.server.fastmcp import FastMCP
 
-from annota import pdf_tools, zotero_db
-from annota.config import ZOTERO_DB_PATH, ZOTERO_STORAGE_DIR
+from annota import ollama_client, pdf_tools, zotero_db
+from annota.config import (
+    OLLAMA_EMBED_MODEL,
+    OLLAMA_LLM_FALLBACK_MODEL,
+    OLLAMA_LLM_MODEL,
+    ZOTERO_DB_PATH,
+    ZOTERO_STORAGE_DIR,
+)
 
 # ── 日志配置（输出到 stderr，不干扰 stdio JSON-RPC）──────────────
 logging.basicConfig(
@@ -61,6 +68,8 @@ mcp = FastMCP(
         "  - create_annotation_direct: 直接用坐标创建标注，无需搜索文本\n"
         "  推荐：需要标注特定词语时，优先使用 highlight_text_phrase。\n"
         "  如果已知精确坐标，使用 create_annotation_direct 最快。"
+        "  For large PDFs prefer get_pdf_manifest -> prepare_pdf_context -> highlight_text_phrase -> batch_annotate.\n"
+        "  prepare_pdf_context uses local Ollama when configured and safely falls back to local retrieval.\n"
     ),
 )
 
@@ -213,6 +222,9 @@ def get_pdf_text_bulk(
     item_id: str,
     pages: list[int] | None = None,
     skip_refs: bool = True,
+    compact: bool = True,
+    max_chars_per_page: int | None = None,
+    max_total_chars: int | None = None,
 ) -> str:
     """批量提取多页 PDF 纯文本（无坐标），适合大 PDF 内容理解。
 
@@ -228,11 +240,222 @@ def get_pdf_text_bulk(
         skip_refs: 是否自动跳过参考文献页（默认 True）
     """
     pdf_path = _resolve_pdf_path(item_id)
-    result = pdf_tools.extract_bulk_text(pdf_path, pages=pages, skip_refs=skip_refs)
+    result = pdf_tools.extract_bulk_text(
+        pdf_path,
+        pages=pages,
+        skip_refs=skip_refs,
+        max_chars_per_page=max_chars_per_page,
+        max_total_chars=max_total_chars,
+    )
+    if compact:
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 # ── Tool 7: get_item_metadata ─────────────────────────────────
+
+@mcp.tool()
+def get_pdf_manifest(
+    item_id: str,
+    skip_refs: bool = True,
+    preview_chars: int = 140,
+) -> str:
+    """Return page counts and short previews without returning full PDF text."""
+    pdf_path = _resolve_pdf_path(item_id)
+    result = pdf_tools.extract_pdf_manifest(
+        pdf_path, skip_refs=skip_refs, preview_chars=preview_chars
+    )
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
+@mcp.tool()
+def search_pdf_text(
+    item_id: str,
+    query: str,
+    pages: list[int] | None = None,
+    skip_refs: bool = True,
+    context_chars: int = 160,
+    max_matches: int = 50,
+) -> str:
+    """Search the PDF locally and return only page-labelled snippets."""
+    pdf_path = _resolve_pdf_path(item_id)
+    result = pdf_tools.search_pdf_text(
+        pdf_path,
+        query,
+        pages=pages,
+        skip_refs=skip_refs,
+        context_chars=context_chars,
+        max_matches=max_matches,
+    )
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right):
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    return dot / (left_norm * right_norm) if left_norm and right_norm else 0.0
+
+
+@mcp.tool()
+def ollama_status() -> str:
+    """Report local Ollama availability and configured models."""
+    result = ollama_client.status()
+    result["llm_model"] = OLLAMA_LLM_MODEL or None
+    result["llm_fallback_model"] = OLLAMA_LLM_FALLBACK_MODEL or None
+    result["embed_model"] = OLLAMA_EMBED_MODEL or None
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
+@mcp.tool()
+def prepare_pdf_context(
+    item_id: str,
+    query: str,
+    pages: list[int] | None = None,
+    skip_refs: bool = True,
+    top_k: int = 8,
+    chunk_chars: int = 2800,
+    max_input_chars: int = 12000,
+    use_ollama: bool = True,
+) -> str:
+    """Retrieve relevant chunks and optionally compress them with Ollama.
+
+    The response contains verbatim evidence and source pages, not generated
+    coordinates. Call highlight_text_phrase to validate phrases before writing.
+    """
+    query = " ".join(query.split())
+    if not query:
+        raise ValueError("query must not be empty")
+    if top_k < 1 or top_k > 50:
+        raise ValueError("top_k must be between 1 and 50")
+    if max_input_chars < 512:
+        raise ValueError("max_input_chars must be at least 512")
+
+    pdf_path = _resolve_pdf_path(item_id)
+    extracted = pdf_tools.extract_text_chunks(
+        pdf_path,
+        pages=pages,
+        skip_refs=skip_refs,
+        max_chars_per_chunk=chunk_chars,
+    )
+    chunks = extracted["chunks"]
+    backend = "lexical"
+    ranked = pdf_tools.rank_text_chunks(chunks, query, limit=top_k)
+
+    if use_ollama and OLLAMA_EMBED_MODEL and chunks:
+        try:
+            vectors = ollama_client.embed(
+                OLLAMA_EMBED_MODEL,
+                [query] + [chunk["text"] for chunk in chunks],
+            )
+            if len(vectors) == len(chunks) + 1:
+                query_vector = vectors[0]
+                ranked = [
+                    dict(chunk, score=round(_cosine_similarity(query_vector, vector), 4))
+                    for chunk, vector in zip(chunks, vectors[1:])
+                ]
+                ranked.sort(key=lambda item: (-item["score"], item["page"], item["chunk_id"]))
+                ranked = ranked[:top_k]
+                backend = "ollama_embeddings"
+        except ollama_client.OllamaError as exc:
+            logger.warning("Ollama embeddings unavailable; using lexical ranking: %s", exc)
+
+    candidates = []
+    used_chars = 0
+    for chunk in ranked:
+        value = chunk["text"]
+        remaining = max_input_chars - used_chars
+        if remaining <= 0:
+            break
+        value = value[:remaining]
+        candidates.append({
+            "chunk_id": chunk["chunk_id"],
+            "page": chunk["page"],
+            "text": value,
+            "score": chunk.get("score", 0),
+        })
+        used_chars += len(value)
+
+    evidence = [
+        {
+            "chunk_id": candidate["chunk_id"],
+            "page": candidate["page"],
+            "quote": candidate["text"],
+            "reason": "retrieved by local text ranking",
+        }
+        for candidate in candidates
+    ]
+    model_used = None
+    fallback_reason = None
+    if use_ollama and OLLAMA_LLM_MODEL and candidates:
+        candidate_text = "\n\n".join(
+            f"[{candidate['chunk_id']} page={candidate['page']}]\n{candidate['text']}"
+            for candidate in candidates
+        )
+        prompt = (
+            "Select the passages relevant to the user request. Return JSON only with "
+            "an evidence array. Each entry must contain chunk_id, page, quote and "
+            "reason. quote must be copied verbatim from one candidate; never invent "
+            "text, page numbers, coordinates, or conclusions. Keep at most 8 entries.\n\n"
+            f"User request: {query}\n\nCandidates:\n{candidate_text}"
+        )
+        generated = None
+        attempted_models = []
+        for model_name in (OLLAMA_LLM_MODEL, OLLAMA_LLM_FALLBACK_MODEL):
+            if not model_name or model_name in attempted_models:
+                continue
+            attempted_models.append(model_name)
+            try:
+                generated = ollama_client.generate_json(
+                    model_name,
+                    prompt,
+                    system="You are a conservative research evidence selector.",
+                )
+                model_used = model_name
+                if model_name != OLLAMA_LLM_MODEL:
+                    fallback_reason = "primary_model_failed_or_insufficient_vram"
+                break
+            except ollama_client.OllamaError as exc:
+                logger.warning("Ollama model %s failed: %s", model_name, exc)
+                fallback_reason = str(exc)
+
+        try:
+            generated_items = generated.get("evidence", []) if isinstance(generated, dict) else []
+            by_id = {candidate["chunk_id"]: candidate for candidate in candidates}
+            validated = []
+            for item in generated_items:
+                if not isinstance(item, dict):
+                    continue
+                source = by_id.get(item.get("chunk_id"))
+                quote = str(item.get("quote", "")).strip()
+                if source and quote and quote.casefold() in source["text"].casefold():
+                    validated.append({
+                        "chunk_id": source["chunk_id"],
+                        "page": source["page"],
+                        "quote": quote,
+                        "reason": str(item.get("reason", "")).strip()[:500],
+                    })
+            if validated:
+                evidence = validated
+            else:
+                model_used = None
+        except (AttributeError, TypeError) as exc:
+            logger.warning("Ollama returned an unexpected response: %s", exc)
+            model_used = None
+
+    return json.dumps({
+        "query": query,
+        "backend": backend,
+        "model": model_used,
+        "fallback_reason": fallback_reason if model_used else None,
+        "total_chunks": len(chunks),
+        "candidate_chars": used_chars,
+        "evidence": evidence,
+        "fallback": model_used is None,
+    }, ensure_ascii=False, separators=(",", ":"))
+
 
 @mcp.tool()
 def get_item_metadata(item_id: str) -> str:
@@ -585,6 +808,12 @@ def _resolve_pdf_path(item_id: str) -> Path:
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF 文件在磁盘上不存在: {pdf_path}")
     return pdf_path
+
+
+# ── 内部辅助 ────────────────────────────────────────────────────
+
+# 匹配 Zotero storage 路径中的 key: .../storage/{8字符KEY}/...
+_STORAGE_KEY_RE = re.compile(r"[/\\]storage[/\\]([A-Z0-9]{8})[/\\]", re.IGNORECASE)
 
 
 def _resolve_item_id(item_id: str) -> int:

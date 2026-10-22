@@ -116,6 +116,8 @@ def extract_bulk_text(
     pdf_path: str | Path,
     pages: list[int] | None = None,
     skip_refs: bool = True,
+    max_chars_per_page: int | None = None,
+    max_total_chars: int | None = None,
 ) -> dict:
     """批量提取多页 PDF 纯文本（无坐标），适合内容理解阶段。
 
@@ -152,15 +154,33 @@ def extract_bulk_text(
             target_pages = list(range(min(refs_start, total_pages)))
 
         result_pages = []
+        returned_chars = 0
+        truncated = False
+        if max_chars_per_page is not None and max_chars_per_page < 1:
+            raise ValueError("max_chars_per_page must be positive")
+        if max_total_chars is not None and max_total_chars < 1:
+            raise ValueError("max_total_chars must be positive")
         for pn in target_pages:
             page = doc[pn]
             text = page.get_text("text").strip()
             if text:
+                if max_chars_per_page is not None and len(text) > max_chars_per_page:
+                    text = text[:max_chars_per_page].rstrip()
+                    truncated = True
+                if max_total_chars is not None:
+                    remaining = max_total_chars - returned_chars
+                    if remaining <= 0:
+                        truncated = True
+                        break
+                    if len(text) > remaining:
+                        text = text[:remaining].rstrip()
+                        truncated = True
                 result_pages.append({
                     "page": pn,
                     "text": text,
                     "char_count": len(text),
                 })
+                returned_chars += len(text)
 
         logger.info(
             "批量提取: %d/%d 页, 跳过参考文献=%s (refs_start=%s)",
@@ -173,6 +193,8 @@ def extract_bulk_text(
             "extracted_pages": len(result_pages),
             "refs_start_page": refs_start if skip_refs and refs_start < total_pages else None,
             "pages": result_pages,
+            "returned_chars": returned_chars,
+            "truncated": truncated,
         }
     finally:
         doc.close()
@@ -203,6 +225,160 @@ def _detect_refs_page(doc) -> int:
     return total  # 未检测到
 
 
+def extract_pdf_manifest(
+    pdf_path: str | Path,
+    *,
+    skip_refs: bool = True,
+    preview_chars: int = 140,
+) -> dict:
+    """Return a compact page index without returning full page text."""
+    if preview_chars < 0:
+        raise ValueError("preview_chars must be non-negative")
+    doc = fitz.open(str(pdf_path))
+    try:
+        total_pages = len(doc)
+        refs_start = _detect_refs_page(doc) if skip_refs else total_pages
+        pages = []
+        for page_number in range(total_pages):
+            text = doc[page_number].get_text("text").strip()
+            first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+            pages.append({
+                "page": page_number,
+                "char_count": len(text),
+                "preview": first_line[:preview_chars],
+                "included": page_number < refs_start,
+            })
+        return {
+            "total_pages": total_pages,
+            "refs_start_page": refs_start if skip_refs and refs_start < total_pages else None,
+            "pages": pages,
+        }
+    finally:
+        doc.close()
+
+
+def extract_text_chunks(
+    pdf_path: str | Path,
+    *,
+    pages: list[int] | None = None,
+    skip_refs: bool = True,
+    max_chars_per_chunk: int = 2800,
+) -> dict:
+    """Extract bounded text chunks while retaining their source page."""
+    if max_chars_per_chunk < 256:
+        raise ValueError("max_chars_per_chunk must be at least 256")
+    doc = fitz.open(str(pdf_path))
+    try:
+        total_pages = len(doc)
+        refs_start = _detect_refs_page(doc) if skip_refs else total_pages
+        if pages is None:
+            target_pages = list(range(min(refs_start, total_pages)))
+        else:
+            target_pages = sorted({p for p in pages if 0 <= p < total_pages and p < refs_start})
+
+        chunks = []
+        total_chars = 0
+        for page_number in target_pages:
+            text = doc[page_number].get_text("text").strip()
+            if not text:
+                continue
+            start = 0
+            while start < len(text):
+                end = min(start + max_chars_per_chunk, len(text))
+                if end < len(text):
+                    split_at = text.rfind(" ", start, end)
+                    if split_at > start + max_chars_per_chunk // 2:
+                        end = split_at
+                value = text[start:end].strip()
+                if value:
+                    chunks.append({
+                        "chunk_id": f"p{page_number}-c{len(chunks)}",
+                        "page": page_number,
+                        "text": value,
+                        "char_count": len(value),
+                    })
+                    total_chars += len(value)
+                start = max(end, start + 1)
+
+        return {
+            "total_pages": total_pages,
+            "refs_start_page": refs_start if skip_refs and refs_start < total_pages else None,
+            "chunks": chunks,
+            "total_chars": total_chars,
+        }
+    finally:
+        doc.close()
+
+
+def search_pdf_text(
+    pdf_path: str | Path,
+    query: str,
+    *,
+    pages: list[int] | None = None,
+    skip_refs: bool = True,
+    context_chars: int = 160,
+    max_matches: int = 50,
+) -> dict:
+    """Search page text locally and return only short, page-labelled snippets."""
+    query = " ".join(query.split())
+    if not query:
+        raise ValueError("query must not be empty")
+    if context_chars < 0 or max_matches < 1:
+        raise ValueError("context_chars must be non-negative and max_matches must be positive")
+
+    data = extract_text_chunks(
+        pdf_path,
+        pages=pages,
+        skip_refs=skip_refs,
+        max_chars_per_chunk=max(256, context_chars * 4 + len(query)),
+    )
+    query_folded = query.casefold()
+    terms = [term for term in query_folded.split() if term]
+    matches = []
+    for chunk in data["chunks"]:
+        text = chunk["text"]
+        folded = text.casefold()
+        exact_at = folded.find(query_folded)
+        term_hits = sum(folded.count(term) for term in terms)
+        if exact_at < 0 and term_hits == 0:
+            continue
+        center = exact_at if exact_at >= 0 else folded.find(terms[0])
+        start = max(0, center - context_chars)
+        end = min(len(text), center + max(len(query), 1) + context_chars)
+        snippet = " ".join(text[start:end].split())
+        matches.append({
+            "page": chunk["page"],
+            "chunk_id": chunk["chunk_id"],
+            "score": round((5 if exact_at >= 0 else 0) + term_hits / max(len(terms), 1), 3),
+            "matched_text": text[exact_at:exact_at + len(query)] if exact_at >= 0 else "",
+            "snippet": snippet,
+        })
+
+    matches.sort(key=lambda item: (-item["score"], item["page"], item["chunk_id"]))
+    return {
+        "query": query,
+        "searched_pages": sorted({chunk["page"] for chunk in data["chunks"]}),
+        "matches": matches[:max_matches],
+        "total_matches": len(matches),
+        "refs_start_page": data["refs_start_page"],
+    }
+
+
+def rank_text_chunks(chunks: list[dict], query: str, limit: int = 8) -> list[dict]:
+    """Rank chunks deterministically; useful as an Ollama-free fallback."""
+    query_folded = " ".join(query.split()).casefold()
+    terms = [term for term in query_folded.split() if term]
+    ranked = []
+    for chunk in chunks:
+        folded = chunk["text"].casefold()
+        hits = sum(folded.count(term) for term in terms)
+        phrase_bonus = 5 if query_folded and query_folded in folded else 0
+        if hits:
+            ranked.append((phrase_bonus + hits / max(len(terms), 1), chunk))
+    ranked.sort(key=lambda pair: (-pair[0], pair[1]["page"], pair[1]["chunk_id"]))
+    return [dict(chunk, score=round(score, 3)) for score, chunk in ranked[:limit]]
+
+
 def get_total_pages(pdf_path: str | Path) -> int:
     """返回 PDF 总页数。"""
     doc = fitz.open(str(pdf_path))
@@ -210,6 +386,8 @@ def get_total_pages(pdf_path: str | Path) -> int:
         return len(doc)
     finally:
         doc.close()
+
+
 def search_text_instances(
     pdf_path: str | Path,
     page_number: int,

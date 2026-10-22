@@ -57,3 +57,12 @@ DEFAULT_COLOR = "#ffd400"
 DB_TIMEOUT = 30           # SQLite 连接超时（秒）
 DB_RETRY_COUNT = 3        # 锁冲突最大重试次数
 DB_RETRY_BASE_DELAY = 1   # 指数退避基础延迟（秒）
+
+# Optional Ollama local preprocessor. An empty model disables model calls.
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_LLM_MODEL = os.environ.get("OLLAMA_LLM_MODEL", "qwen2.5:7b")
+OLLAMA_LLM_FALLBACK_MODEL = os.environ.get(
+    "OLLAMA_LLM_FALLBACK_MODEL", "deepseek-r1:1.5b"
+)
+OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "")
+OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "90"))
