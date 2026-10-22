@@ -553,3 +553,110 @@ def create_child_note(
         raise
     finally:
         conn.close()
+
+
+@_retry_on_lock
+def delete_annotation(annotation_id: int) -> dict:
+    """删除指定的 PDF 标注。
+
+    Args:
+        annotation_id: 标注的 itemID（可从 list_annotations 获取）
+
+    Returns:
+        {"deleted": bool, "itemID": int}
+    """
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+
+        # 检查是否为标注类型
+        row = cursor.execute(
+            "SELECT itemTypeID FROM items WHERE itemID = ?",
+            (annotation_id,),
+        ).fetchone()
+
+        if not row:
+            return {"deleted": False, "error": f"itemID={annotation_id} 不存在"}
+
+        if row["itemTypeID"] != ITEM_TYPE_ANNOTATION:
+            return {
+                "deleted": False,
+                "error": f"itemID={annotation_id} 不是标注类型（itemTypeID={row['itemTypeID']}）",
+            }
+
+        # 删除 itemAnnotations 记录
+        cursor.execute(
+            "DELETE FROM itemAnnotations WHERE itemID = ?",
+            (annotation_id,),
+        )
+
+        # 删除 items 记录
+        cursor.execute(
+            "DELETE FROM items WHERE itemID = ?",
+            (annotation_id,),
+        )
+
+        conn.commit()
+        logger.info("删除标注: itemID=%d", annotation_id)
+        return {"deleted": True, "itemID": annotation_id}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@_retry_on_lock
+def delete_annotations_batch(annotation_ids: list[int]) -> dict:
+    """批量删除多个 PDF 标注。
+
+    Args:
+        annotation_ids: 标注 itemID 列表
+
+    Returns:
+        {"deleted_count": int, "failed": [...]}
+    """
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+        deleted_count = 0
+        failed = []
+
+        for ann_id in annotation_ids:
+            try:
+                # 检查是否为标注类型
+                row = cursor.execute(
+                    "SELECT itemTypeID FROM items WHERE itemID = ?",
+                    (ann_id,),
+                ).fetchone()
+
+                if not row:
+                    failed.append({"itemID": ann_id, "reason": "不存在"})
+                    continue
+
+                if row["itemTypeID"] != ITEM_TYPE_ANNOTATION:
+                    failed.append({"itemID": ann_id, "reason": "不是标注类型"})
+                    continue
+
+                # 删除
+                cursor.execute(
+                    "DELETE FROM itemAnnotations WHERE itemID = ?",
+                    (ann_id,),
+                )
+                cursor.execute(
+                    "DELETE FROM items WHERE itemID = ?",
+                    (ann_id,),
+                )
+                deleted_count += 1
+
+            except Exception as e:
+                failed.append({"itemID": ann_id, "reason": str(e)})
+
+        conn.commit()
+        logger.info("批量删除标注: 成功=%d, 失败=%d", deleted_count, len(failed))
+        return {"deleted_count": deleted_count, "failed": failed}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()

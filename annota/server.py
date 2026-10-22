@@ -10,6 +10,8 @@
   - search_zotero_items:   按标题/作者/key 搜索条目
   - get_item_metadata:     获取条目元数据（作者、年份、期刊等）
   - list_annotations:      列出 PDF 上已有的标注
+  - delete_annotation:     删除单个标注
+  - delete_annotations_batch: 批量删除标注
 
 运行方式: python server.py  (stdio transport, 供 Claude Code 调用)
 """
@@ -808,6 +810,69 @@ def _resolve_pdf_path(item_id: str) -> Path:
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF 文件在磁盘上不存在: {pdf_path}")
     return pdf_path
+
+
+# ── Tool 14: delete_annotation ───────────────────────────────
+
+@mcp.tool()
+def delete_annotation(annotation_id: int) -> str:
+    """删除指定的 PDF 标注。
+
+    从 Zotero 数据库中删除一个标注。删除后需要重启 Zotero 或按 Ctrl+Shift+R 刷新。
+    注意：写操作需要关闭 Zotero 桌面应用。
+
+    Args:
+        annotation_id: 标注的 itemID（从 list_annotations 获取）
+
+    Returns:
+        JSON 格式的删除结果，包含是否成功和错误信息（如有）
+    """
+    try:
+        result = zotero_db.delete_annotation(annotation_id)
+        if result.get("deleted"):
+            return json.dumps({
+                **result,
+                "message": f"标注 {annotation_id} 已删除。请重启 Zotero 或按 Ctrl+Shift+R 刷新查看。",
+            }, ensure_ascii=False)
+        else:
+            return json.dumps(result, ensure_ascii=False)
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            return json.dumps({
+                "error": "database_locked",
+                "message": "Zotero 数据库被锁定，请先关闭 Zotero 桌面应用再重试。",
+            }, ensure_ascii=False)
+        raise
+
+
+# ── Tool 15: delete_annotations_batch ──────────────────────
+
+@mcp.tool()
+def delete_annotations_batch(annotation_ids: list[int]) -> str:
+    """批量删除多个 PDF 标注。
+
+    一次性删除多个标注，比逐个调用 delete_annotation 更高效。
+    写操作需要关闭 Zotero 桌面应用。
+
+    Args:
+        annotation_ids: 标注 itemID 列表（从 list_annotations 获取）
+
+    Returns:
+        JSON 格式的批量删除结果，包含成功数量和失败列表
+    """
+    try:
+        result = zotero_db.delete_annotations_batch(annotation_ids)
+        return json.dumps({
+            **result,
+            "message": f"已删除 {result['deleted_count']} 个标注。请重启 Zotero 或按 Ctrl+Shift+R 刷新查看。",
+        }, ensure_ascii=False)
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            return json.dumps({
+                "error": "database_locked",
+                "message": "Zotero 数据库被锁定，请先关闭 Zotero 桌面应用再重试。",
+            }, ensure_ascii=False)
+        raise
 
 
 # ── 内部辅助 ────────────────────────────────────────────────────
