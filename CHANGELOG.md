@@ -4,6 +4,34 @@ All notable changes to Annota will be documented in this file.
 
 ## [Unreleased]
 
+### Added - Paper Translation
+
+- `translate_paper` MCP tool: translate a paper and save it as a Zotero child
+  note with page headings
+- `translation_status` MCP tool: report local Ollama and DeepSeek availability
+  without starting a server or prompting
+- Provider order: local Ollama first (auto-starts `ollama serve` when possible),
+  then DeepSeek API
+- DeepSeek settings from `DEEPSEEK_API_KEY` / `~/.annota/config.json`; the CLI
+  prompts for API settings when neither provider is available
+- MCP calls never prompt: without a local model or API key they return
+  `translation_unavailable`
+- `translate_paper.py` CLI with page selection, target language, and note output
+- Documentation in `docs/translation.md`
+
+### Added - Zotero Process and Lock Preflight
+
+- Detect running Zotero processes and probe SQLite write availability
+- Fail writes early with a clear close-Zotero message instead of a generic lock
+  timeout
+- `zotero_status` MCP tool with PIDs, database state, and a user hint
+
+### Added - Collection-Aware Search
+
+- `list_collections` MCP tool with nested folder paths and item counts
+- `search_zotero_items` / `list_zotero_items` accept a `collection` filter
+- Search results and item metadata include collection paths
+
 ### Added - Duplicate PDF Detection and Merging
 
 - `find_duplicate_pdfs` MCP tool: read-only scan for byte-identical PDFs stored
@@ -11,7 +39,7 @@ All notable changes to Annota will be documented in this file.
 - `merge_duplicate_pdfs` MCP tool: merge annotations, notes, tags, and
   collections into the kept copy; duplicates move to the Zotero trash
 - Language guard: different metadata/detected languages are reported as
-  `different_language` and are never merged (translation support is future work)
+  `different_language` and are never merged (translation is a separate feature)
 - `merge_duplicate_pdfs.py` CLI with dry-run and `--apply` modes
 - Documentation in `docs/duplicate-pdf-merge.md`
 

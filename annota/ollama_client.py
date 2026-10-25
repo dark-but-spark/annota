@@ -79,6 +79,33 @@ def generate_json(
         raise OllamaError(f"Ollama returned invalid JSON: {text[:240]}") from exc
 
 
+def generate(
+    model: str,
+    prompt: str,
+    *,
+    system: str = "",
+    temperature: float = 0.2,
+) -> str:
+    """Generate plain text from Ollama (used for translation)."""
+    if not model:
+        raise OllamaError("OLLAMA_LLM_MODEL is not configured")
+
+    payload: dict[str, Any] = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {"temperature": temperature},
+    }
+    if system:
+        payload["system"] = system
+    result = _request("/api/generate", payload)
+    text = str(result.get("response", "")).strip()
+    if not text:
+        raise OllamaError("Ollama returned an empty response")
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return text.strip()
+
+
 def embed(model: str, inputs: list[str]) -> list[list[float]]:
     """Create embeddings, supporting both current and legacy Ollama endpoints."""
     if not model:

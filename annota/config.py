@@ -66,3 +66,24 @@ OLLAMA_LLM_FALLBACK_MODEL = os.environ.get(
 )
 OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "")
 OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "90"))
+OLLAMA_AUTO_START = os.environ.get("OLLAMA_AUTO_START", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+
+# ── Paper translation ───────────────────────────────────────────
+TRANSLATION_TARGET_LANGUAGE = os.environ.get("ANNOTA_TRANSLATION_TARGET", "zh-CN")
+TRANSLATION_CHUNK_CHARS = int(os.environ.get("ANNOTA_TRANSLATION_CHUNK_CHARS", "3000"))
+TRANSLATION_PROVIDER = os.environ.get("ANNOTA_TRANSLATION_PROVIDER", "auto").lower()
+
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = os.environ.get(
+    "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
+).rstrip("/")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_TIMEOUT = float(os.environ.get("DEEPSEEK_TIMEOUT", "120"))
+
+ANNOTA_USER_CONFIG_PATH = Path(
+    os.environ.get("ANNOTA_CONFIG_PATH", str(Path.home() / ".annota" / "config.json"))
+)

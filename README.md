@@ -44,8 +44,9 @@ AI reads your papers, highlights key findings, explains formulas, and writes str
 
 | Tool | What it does |
 |------|-------------|
-| `search_zotero_items` | Search by title / author / key |
-| `list_zotero_items` | Browse recent items |
+| `search_zotero_items` | Search by title / author / key, optionally within a folder |
+| `list_zotero_items` | Browse recent items, optionally within a folder |
+| `list_collections` | List Zotero folders and item counts |
 | `get_item_metadata` | Get authors, year, venue, DOI |
 | `get_pdf_text_bulk` | Extract full text (no coords, fast) |
 | `get_pdf_layout_text` | Extract text + precise coordinates (line-level) |
@@ -58,6 +59,9 @@ AI reads your papers, highlights key findings, explains formulas, and writes str
 | 🆕 `highlight_text_phrase` | **Word-level**: Smart phrase matching (recommended) |
 | 🆕 `find_duplicate_pdfs` | **Library cleanup**: Find identical PDFs under the same title |
 | 🆕 `merge_duplicate_pdfs` | **Library cleanup**: Merge annotations/notes into the kept copy |
+| 🆕 `zotero_status` | **Safety**: Check Zotero processes, database path, and write lock |
+| 🆕 `translation_status` | **Translation**: Check local Ollama / DeepSeek availability |
+| 🆕 `translate_paper` | **Translation**: Translate a paper and save it as a child note |
 
 ### 3 Claude Code Skills (Slash Commands)
 
@@ -74,6 +78,9 @@ AI reads your papers, highlights key findings, explains formulas, and writes str
 - **Auto-skip references** — Detects "References" section and skips it. A 21-page paper extracts only 13 pages.
 - **Batch annotations** — Creates 10 highlights in 1 API call instead of 10.
 - **Duplicate cleanup** 🆕 — Finds byte-identical PDFs under the same title and merges annotations/notes into the kept copy. Different-language copies are skipped.
+- **Collection-aware search** 🆕 — Search results include Zotero folder paths, and searches can be scoped to a folder.
+- **Safe writes** 🆕 — Detects a running Zotero process and SQLite lock before writing, with a clear "close Zotero" message instead of a timeout.
+- **Paper translation** 🆕 — Translates papers with a local Ollama model first, falls back to the DeepSeek API, and saves the result as a child note.
 - **Friendly errors** — Write failures return helpful messages instead of crashing.
 
 ---

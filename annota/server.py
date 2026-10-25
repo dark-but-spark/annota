@@ -12,6 +12,8 @@
   - list_annotations:      列出 PDF 上已有的标注
   - list_collections:      列出 Zotero 文件夹
   - zotero_status:         检查 Zotero 进程与数据库锁
+  - translation_status:    检查本地模型 / DeepSeek 可用性
+  - translate_paper:       翻译论文并保存子笔记
   - delete_annotation:     删除单个标注
   - delete_annotations_batch: 批量删除标注
   - find_duplicate_pdfs:   查找同标题下内容相同的 PDF
@@ -38,11 +40,13 @@ import sqlite3
 
 from mcp.server.fastmcp import FastMCP
 
-from annota import duplicates, ollama_client, pdf_tools, zotero_db
+from annota import duplicates, ollama_client, pdf_tools, translation, zotero_db
 from annota.config import (
     OLLAMA_EMBED_MODEL,
     OLLAMA_LLM_FALLBACK_MODEL,
     OLLAMA_LLM_MODEL,
+    TRANSLATION_CHUNK_CHARS,
+    TRANSLATION_TARGET_LANGUAGE,
     ZOTERO_DB_PATH,
     ZOTERO_STORAGE_DIR,
 )
@@ -814,8 +818,7 @@ _STORAGE_KEY_RE = re.compile(r"[/\\]storage[/\\]([A-Z0-9]{8})[/\\]", re.IGNORECA
 def _resolve_pdf_path(item_id: str) -> Path:
     """将 item_id 解析为 PDF 文件路径。
 
-    如果是纯数字，按 Zotero itemID 查找；
-    如果包含路径分隔符，按文件路径处理。
+    支持 PDF 绝对路径、附件 itemID、父条目 itemID 或 Zotero key。
     """
     if "/" in item_id or "\\" in item_id or ":" in item_id:
         p = Path(item_id)
@@ -823,12 +826,28 @@ def _resolve_pdf_path(item_id: str) -> Path:
             raise FileNotFoundError(f"PDF 文件不存在: {item_id}")
         return p
 
-    attachment_id = int(item_id)
-    pdf_path = zotero_db.get_pdf_path(attachment_id)
-    if pdf_path is None:
-        raise FileNotFoundError(
-            f"在 Zotero 数据库中未找到 itemID={attachment_id} 对应的 PDF 文件"
-        )
+    if item_id.isdigit():
+        item_number = int(item_id)
+        pdf_path = zotero_db.get_pdf_path(item_number)
+        if pdf_path is None:
+            metadata = zotero_db.get_item_metadata(item_number)
+            attachment_id = metadata.get("pdf_attachment_id")
+            if attachment_id:
+                pdf_path = zotero_db.get_pdf_path(attachment_id)
+        if pdf_path is None:
+            raise FileNotFoundError(
+                f"在 Zotero 数据库中未找到 itemID={item_number} 对应的 PDF 文件"
+            )
+    else:
+        attachment_id = zotero_db.get_attachment_id_by_key(item_id)
+        if attachment_id is None:
+            raise FileNotFoundError(f"在 Zotero 数据库中未找到 key={item_id} 对应的条目")
+        pdf_path = zotero_db.get_pdf_path(attachment_id)
+        if pdf_path is None:
+            raise FileNotFoundError(
+                f"key={item_id} 对应的条目没有可用的 PDF 附件"
+            )
+
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF 文件在磁盘上不存在: {pdf_path}")
     return pdf_path
@@ -934,6 +953,104 @@ def _resolve_item_id(item_id: str) -> int:
         return aid
 
     raise ValueError(f"无法解析 item_id: {item_id}")
+
+
+@mcp.tool()
+def translation_status() -> str:
+    """检查论文翻译服务：本地 Ollama 与 DeepSeek API 的可用性。
+
+    不会启动 Ollama、不会弹窗询问 API 信息。用于在执行 translate_paper 前
+    判断当前会走本地模型还是 DeepSeek。
+    """
+    return json.dumps(
+        translation.provider_status(), ensure_ascii=False, indent=2
+    )
+
+
+@mcp.tool()
+def translate_paper(
+    item_id: str,
+    pages: list[int] | None = None,
+    target_language: str = TRANSLATION_TARGET_LANGUAGE,
+    save_note: bool = True,
+    max_chars_per_chunk: int = TRANSLATION_CHUNK_CHARS,
+) -> str:
+    """翻译论文并保存为 Zotero 子笔记。
+
+    优先使用本地 Ollama 模型；本地不可用时回退到 DeepSeek API。MCP 调用不会
+    交互式询问 API 信息：如果两者都不可用，直接返回 translation_unavailable。
+    保存笔记需要关闭 Zotero 桌面应用。
+
+    Args:
+        item_id: Zotero 条目/PDF 附件 itemID、Zotero key，或 PDF 绝对路径
+        pages: 要翻译的页码（0-indexed），不传则翻译全文（自动跳过参考文献）
+        target_language: 目标语言（默认 zh-CN）
+        save_note: 是否保存为子笔记；false 时直接返回译文
+        max_chars_per_chunk: 每次发给模型的字符数上限（默认 3000）
+    """
+    try:
+        pdf_path = _resolve_pdf_path(item_id)
+        parent_item_id = None
+        title = None
+        if save_note:
+            ensure_write_ready()
+            metadata = zotero_db.get_item_metadata(_resolve_item_id(item_id))
+            if "error" in metadata or not metadata.get("itemID"):
+                return json.dumps({
+                    "error": "item_not_found",
+                    "message": f"无法解析 Zotero 父条目: {metadata.get('error', item_id)}",
+                }, ensure_ascii=False)
+            parent_item_id = metadata["itemID"]
+            title = metadata.get("title", "")
+
+        result = translation.translate_pdf(
+            pdf_path,
+            pages=pages or None,
+            target_language=target_language,
+            max_chars_per_chunk=max_chars_per_chunk,
+            allow_prompt=False,
+        )
+
+        if not save_note:
+            return json.dumps(result, ensure_ascii=False)
+
+        note = translation.save_translation_note(parent_item_id, title, result)
+        return json.dumps({
+            "status": "ok",
+            "provider": result["provider"],
+            "model": result["model"],
+            "target_language": result["target_language"],
+            "page_count": result["page_count"],
+            "chunk_count": result["chunk_count"],
+            "note_item_id": note["itemID"],
+            "note_key": note["key"],
+            "message": "翻译已保存为子笔记。请重启 Zotero 或按 Ctrl+Shift+R 刷新查看。",
+        }, ensure_ascii=False)
+    except translation.TranslationUnavailableError as exc:
+        return json.dumps({
+            "error": "translation_unavailable",
+            "message": str(exc),
+            "hint": "调用 translation_status 查看本地模型/API 状态；"
+                    "或先运行 translate_paper.py 交互式配置 DeepSeek API。",
+        }, ensure_ascii=False)
+    except translation.TranslationError as exc:
+        return json.dumps({
+            "error": "translation_failed",
+            "message": str(exc),
+        }, ensure_ascii=False)
+    except (FileNotFoundError, ValueError) as exc:
+        return json.dumps({
+            "error": "item_not_found",
+            "message": str(exc),
+        }, ensure_ascii=False)
+    except sqlite3.OperationalError as exc:
+        if "locked" in str(exc).lower():
+            return json.dumps({
+                "error": "database_locked",
+                "message": str(exc),
+                "hint": "保存翻译笔记需要先关闭 Zotero；也可先用 save_note=false 只获取译文。",
+            }, ensure_ascii=False)
+        raise
 
 
 @mcp.tool()
