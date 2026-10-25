@@ -11,6 +11,7 @@
   - get_item_metadata:     获取条目元数据（作者、年份、期刊等）
   - list_annotations:      列出 PDF 上已有的标注
   - list_collections:      列出 Zotero 文件夹
+  - zotero_status:         检查 Zotero 进程与数据库锁
   - delete_annotation:     删除单个标注
   - delete_annotations_batch: 批量删除标注
   - find_duplicate_pdfs:   查找同标题下内容相同的 PDF
@@ -45,6 +46,7 @@ from annota.config import (
     ZOTERO_DB_PATH,
     ZOTERO_STORAGE_DIR,
 )
+from annota.zotero_status import ensure_write_ready, get_status as get_zotero_status
 
 # ── 日志配置（输出到 stderr，不干扰 stdio JSON-RPC）──────────────
 logging.basicConfig(
@@ -932,6 +934,17 @@ def _resolve_item_id(item_id: str) -> int:
         return aid
 
     raise ValueError(f"无法解析 item_id: {item_id}")
+
+
+@mcp.tool()
+def zotero_status() -> str:
+    """检查 Zotero 进程、数据库路径和写锁状态。
+
+    Call this before write operations or when a tool reports database_locked.
+    Reports whether Zotero is running, its PIDs, whether the database is
+    writable, and a hint for the user.
+    """
+    return json.dumps(get_zotero_status(refresh=True), ensure_ascii=False, indent=2)
 
 
 @mcp.tool()

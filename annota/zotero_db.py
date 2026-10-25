@@ -30,6 +30,7 @@ from .config import (
     ZOTERO_DB_PATH,
     ZOTERO_STORAGE_DIR,
 )
+from .zotero_status import ensure_write_ready
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ def _retry_on_lock(fn):
     """装饰器：写操作遇到 database-is-locked 时指数退避重试。"""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        ensure_write_ready()
         last_err = None
         for attempt in range(DB_RETRY_COUNT + 1):
             try:
