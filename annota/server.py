@@ -10,6 +10,7 @@
   - search_zotero_items:   按标题/作者/key 搜索条目
   - get_item_metadata:     获取条目元数据（作者、年份、期刊等）
   - list_annotations:      列出 PDF 上已有的标注
+  - list_collections:      列出 Zotero 文件夹
   - delete_annotation:     删除单个标注
   - delete_annotations_batch: 批量删除标注
   - find_duplicate_pdfs:   查找同标题下内容相同的 PDF
@@ -190,33 +191,50 @@ def add_child_note(parent_item_id: str, note_content: str) -> str:
 # ── Tool 4: list_zotero_items ──────────────────────────────────
 
 @mcp.tool()
-def list_zotero_items(limit: int = 50) -> str:
+def list_zotero_items(limit: int = 50, collection: str | None = None) -> str:
     """列出 Zotero 库中的文献条目。
 
-    返回每个条目的 itemID、key、标题，以及 PDF 附件 ID（如有）。
+    返回每个条目的 itemID、key、标题、所属文件夹，以及 PDF 附件 ID（如有）。
     用于发现 item_id 以供其他工具使用。
 
     Args:
         limit: 最多返回条目数（默认 50）
+        collection: 可选，按文件夹名称或路径片段过滤（不区分大小写）
     """
-    items = zotero_db.list_items(limit=limit)
+    items = zotero_db.list_items(limit=limit, collection=collection)
     return json.dumps(items, ensure_ascii=False, indent=2)
 
 
 # ── Tool 5: search_zotero_items ────────────────────────────────
 
 @mcp.tool()
-def search_zotero_items(query: str, limit: int = 20) -> str:
-    """按标题、作者或 key 搜索 Zotero 条目。
+def search_zotero_items(
+    query: str,
+    limit: int = 20,
+    collection: str | None = None,
+) -> str:
+    """按标题、作者或 key 搜索 Zotero 条目，可按文件夹缩小范围。
 
     比 list_zotero_items 更高效，可直接定位目标论文。
 
     Args:
         query: 搜索关键词（标题/作者的部分文字，或 Zotero item key）
         limit: 最多返回条目数（默认 20）
+        collection: 可选，按文件夹名称或路径片段过滤（不区分大小写）
     """
-    items = zotero_db.search_items(query=query, limit=limit)
+    items = zotero_db.search_items(query=query, limit=limit, collection=collection)
     return json.dumps(items, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+def list_collections() -> str:
+    """列出 Zotero 文件夹（collection）及其条目数量。
+
+    返回 collectionID、名称、层级路径和直接包含的条目数，可用于
+    search_zotero_items / list_zotero_items 的 collection 参数。
+    """
+    collections = zotero_db.list_collections()
+    return json.dumps(collections, ensure_ascii=False, indent=2)
 
 
 # ── Tool 6: get_pdf_text_bulk ─────────────────────────────────

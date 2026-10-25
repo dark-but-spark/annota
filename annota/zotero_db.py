@@ -164,11 +164,105 @@ def get_pdf_path(item_id: int) -> Path | None:
         conn.close()
 
 
-def list_items(limit: int = 50) -> list[dict]:
-    """列出 Zotero 库中的条目（含标题和附件信息）。"""
+def _collection_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """SELECT collectionID, collectionName, parentCollectionID
+           FROM collections
+           WHERE libraryID = ?""",
+        (LIBRARY_ID,),
+    ).fetchall()
+
+
+def _collection_paths(rows: list[sqlite3.Row]) -> dict[int, str]:
+    """Build human-readable paths for possibly nested collections."""
+    by_id = {row["collectionID"]: row for row in rows}
+    paths: dict[int, str] = {}
+
+    def build(collection_id: int, stack: tuple[int, ...] = ()) -> str:
+        if collection_id in paths:
+            return paths[collection_id]
+        row = by_id.get(collection_id)
+        if not row:
+            return ""
+        parent_id = row["parentCollectionID"]
+        if parent_id in by_id and parent_id not in stack:
+            value = f"{build(parent_id, stack + (collection_id,))} / {row['collectionName']}"
+        else:
+            value = row["collectionName"]
+        paths[collection_id] = value
+        return value
+
+    for collection_id in by_id:
+        build(collection_id)
+    return paths
+
+
+def _collections_for_items(
+    conn: sqlite3.Connection,
+    item_ids: list[int],
+) -> dict[int, list[dict]]:
+    result: dict[int, list[dict]] = {item_id: [] for item_id in item_ids}
+    if not item_ids:
+        return result
+
+    rows = _collection_rows(conn)
+    by_id = {row["collectionID"]: row for row in rows}
+    paths = _collection_paths(rows)
+    placeholders = ",".join("?" for _ in item_ids)
+    members = conn.execute(
+        f"""SELECT itemID, collectionID
+            FROM collectionItems
+            WHERE itemID IN ({placeholders})""",
+        tuple(item_ids),
+    ).fetchall()
+
+    for member in members:
+        row = by_id.get(member["collectionID"])
+        if not row:
+            continue
+        result[member["itemID"]].append({
+            "collectionID": row["collectionID"],
+            "name": row["collectionName"],
+            "path": paths.get(row["collectionID"], row["collectionName"]),
+        })
+
+    for collections in result.values():
+        collections.sort(key=lambda item: item["path"].casefold())
+    return result
+
+
+def _resolve_collection_ids(conn: sqlite3.Connection, collection: str) -> list[int]:
+    """Resolve a collection name/path fragment to collection IDs."""
+    needle = (collection or "").strip().casefold()
+    if not needle:
+        return []
+    paths = _collection_paths(_collection_rows(conn))
+    return [
+        collection_id
+        for collection_id, path in paths.items()
+        if needle in path.casefold()
+    ]
+
+
+def list_items(limit: int = 50, collection: str | None = None) -> list[dict]:
+    """列出 Zotero 库中的条目（含标题、附件与文件夹信息）。"""
     conn = _connect(readonly=True)
     try:
-        rows = conn.execute("""
+        params: list = [LIBRARY_ID]
+        collection_filter = ""
+        if collection:
+            collection_ids = _resolve_collection_ids(conn, collection)
+            if not collection_ids:
+                return []
+            placeholders = ",".join("?" for _ in collection_ids)
+            collection_filter = (
+                "AND i.itemID IN ("
+                "SELECT itemID FROM collectionItems "
+                f"WHERE collectionID IN ({placeholders}))"
+            )
+            params.extend(collection_ids)
+
+        rows = conn.execute(f"""
             SELECT
                 i.itemID,
                 i.key,
@@ -184,16 +278,22 @@ def list_items(limit: int = 50) -> list[dict]:
                 ON id_title.valueID = idv_title.valueID
             WHERE i.itemTypeID NOT IN (1, 3, 28)
                 AND i.libraryID = ?
+                AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                {collection_filter}
             ORDER BY i.dateModified DESC
             LIMIT ?
-        """, (LIBRARY_ID, limit)).fetchall()
+        """, (*params, limit)).fetchall()
 
+        collections_map = _collections_for_items(
+            conn, [row["itemID"] for row in rows]
+        )
         result = []
         for row in rows:
             item = {
                 "itemID": row["itemID"],
                 "key": row["key"],
                 "title": row["title"] or "(无标题)",
+                "collections": collections_map.get(row["itemID"], []),
             }
             # 查找 PDF 附件
             att = conn.execute("""
@@ -211,6 +311,36 @@ def list_items(limit: int = 50) -> list[dict]:
 
             result.append(item)
 
+        return result
+    finally:
+        conn.close()
+
+
+def list_collections() -> list[dict]:
+    """List Zotero collections with paths and direct item counts."""
+    conn = _connect(readonly=True)
+    try:
+        rows = _collection_rows(conn)
+        paths = _collection_paths(rows)
+        counts = {
+            row["collectionID"]: row["item_count"]
+            for row in conn.execute(
+                """SELECT collectionID, COUNT(*) AS item_count
+                   FROM collectionItems
+                   GROUP BY collectionID"""
+            ).fetchall()
+        }
+        result = [
+            {
+                "collectionID": row["collectionID"],
+                "name": row["collectionName"],
+                "path": paths.get(row["collectionID"], row["collectionName"]),
+                "parentCollectionID": row["parentCollectionID"],
+                "item_count": counts.get(row["collectionID"], 0),
+            }
+            for row in rows
+        ]
+        result.sort(key=lambda item: item["path"].casefold())
         return result
     finally:
         conn.close()
@@ -304,12 +434,30 @@ def get_attachment_id_by_key(key: str) -> int | None:
         conn.close()
 
 
-def search_items(query: str, limit: int = 20) -> list[dict]:
-    """按标题或作者模糊搜索 Zotero 条目。"""
+def search_items(
+    query: str,
+    limit: int = 20,
+    collection: str | None = None,
+) -> list[dict]:
+    """按标题、作者或 key 模糊搜索 Zotero 条目，可按文件夹过滤。"""
     conn = _connect(readonly=True)
     try:
         pattern = f"%{query}%"
-        rows = conn.execute("""
+        params: list = [LIBRARY_ID, pattern, pattern, pattern, query]
+        collection_filter = ""
+        if collection:
+            collection_ids = _resolve_collection_ids(conn, collection)
+            if not collection_ids:
+                return []
+            placeholders = ",".join("?" for _ in collection_ids)
+            collection_filter = (
+                "AND i.itemID IN ("
+                "SELECT itemID FROM collectionItems "
+                f"WHERE collectionID IN ({placeholders}))"
+            )
+            params.extend(collection_ids)
+
+        rows = conn.execute(f"""
             SELECT DISTINCT
                 i.itemID,
                 i.key,
@@ -326,6 +474,8 @@ def search_items(query: str, limit: int = 20) -> list[dict]:
             LEFT JOIN creators c ON ic.creatorID = c.creatorID
             WHERE i.itemTypeID NOT IN (1, 3, 28)
                 AND i.libraryID = ?
+                AND i.itemID NOT IN (SELECT itemID FROM deletedItems)
+                {collection_filter}
                 AND (
                     idv_title.value LIKE ?
                     OR c.lastName LIKE ?
@@ -334,14 +484,18 @@ def search_items(query: str, limit: int = 20) -> list[dict]:
                 )
             ORDER BY i.dateModified DESC
             LIMIT ?
-        """, (LIBRARY_ID, pattern, pattern, pattern, query, limit)).fetchall()
+        """, (*params, limit)).fetchall()
 
+        collections_map = _collections_for_items(
+            conn, [row["itemID"] for row in rows]
+        )
         result = []
         for row in rows:
             item = {
                 "itemID": row["itemID"],
                 "key": row["key"],
                 "title": row["title"] or "(无标题)",
+                "collections": collections_map.get(row["itemID"], []),
             }
             att = conn.execute("""
                 SELECT ia.itemID AS attID, ia.path
@@ -434,6 +588,8 @@ def get_item_metadata(item_id: int) -> dict:
         """, (item_id,)).fetchone()
         if att:
             result["pdf_attachment_id"] = att["attID"]
+
+        result["collections"] = _collections_for_items(conn, [item_id]).get(item_id, [])
 
         return result
     finally:
