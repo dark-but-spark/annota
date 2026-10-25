@@ -4,6 +4,17 @@ All notable changes to Annota will be documented in this file.
 
 ## [Unreleased]
 
+### Added - Duplicate PDF Detection and Merging
+
+- `find_duplicate_pdfs` MCP tool: read-only scan for byte-identical PDFs stored
+  under the same normalized title
+- `merge_duplicate_pdfs` MCP tool: merge annotations, notes, tags, and
+  collections into the kept copy; duplicates move to the Zotero trash
+- Language guard: different metadata/detected languages are reported as
+  `different_language` and are never merged (translation support is future work)
+- `merge_duplicate_pdfs.py` CLI with dry-run and `--apply` modes
+- Documentation in `docs/duplicate-pdf-merge.md`
+
 ### Added - Word-Level Annotation Support 🎉
 
 #### New MCP Tools (3)

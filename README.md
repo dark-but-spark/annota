@@ -40,7 +40,7 @@ AI reads your papers, highlights key findings, explains formulas, and writes str
 
 ## ✨ Features
 
-### 12 MCP Tools
+### MCP Tools
 
 | Tool | What it does |
 |------|-------------|
@@ -56,6 +56,8 @@ AI reads your papers, highlights key findings, explains formulas, and writes str
 | 🆕 `search_text_instances` | **Word-level**: Search exact text phrases |
 | 🆕 `extract_word_level_text` | **Word-level**: Extract every word's coordinates |
 | 🆕 `highlight_text_phrase` | **Word-level**: Smart phrase matching (recommended) |
+| 🆕 `find_duplicate_pdfs` | **Library cleanup**: Find identical PDFs under the same title |
+| 🆕 `merge_duplicate_pdfs` | **Library cleanup**: Merge annotations/notes into the kept copy |
 
 ### 3 Claude Code Skills (Slash Commands)
 
@@ -71,6 +73,7 @@ AI reads your papers, highlights key findings, explains formulas, and writes str
 - **Word-level precision** 🆕 — New tools for precise word/phrase annotation instead of just line-level highlighting.
 - **Auto-skip references** — Detects "References" section and skips it. A 21-page paper extracts only 13 pages.
 - **Batch annotations** — Creates 10 highlights in 1 API call instead of 10.
+- **Duplicate cleanup** 🆕 — Finds byte-identical PDFs under the same title and merges annotations/notes into the kept copy. Different-language copies are skipped.
 - **Friendly errors** — Write failures return helpful messages instead of crashing.
 
 ---

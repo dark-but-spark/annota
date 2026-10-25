@@ -12,6 +12,8 @@
   - list_annotations:      列出 PDF 上已有的标注
   - delete_annotation:     删除单个标注
   - delete_annotations_batch: 批量删除标注
+  - find_duplicate_pdfs:   查找同标题下内容相同的 PDF
+  - merge_duplicate_pdfs:  合并重复 PDF 的标注与笔记
 
 运行方式: python server.py  (stdio transport, 供 Claude Code 调用)
 """
@@ -34,7 +36,7 @@ import sqlite3
 
 from mcp.server.fastmcp import FastMCP
 
-from annota import ollama_client, pdf_tools, zotero_db
+from annota import duplicates, ollama_client, pdf_tools, zotero_db
 from annota.config import (
     OLLAMA_EMBED_MODEL,
     OLLAMA_LLM_FALLBACK_MODEL,
@@ -912,6 +914,43 @@ def _resolve_item_id(item_id: str) -> int:
         return aid
 
     raise ValueError(f"无法解析 item_id: {item_id}")
+
+
+@mcp.tool()
+def find_duplicate_pdfs() -> str:
+    """Find byte-identical PDFs stored under the same paper title.
+
+    Read-only. Each group reports whether it is mergeable and which attachment
+    would be kept. Copies detected as different languages are reported with
+    reason=different_language and are never merged.
+    """
+    groups = duplicates.find_duplicate_pdfs()
+    return json.dumps(
+        {"group_count": len(groups), "groups": groups},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+@mcp.tool()
+def merge_duplicate_pdfs(dry_run: bool = True, title: str | None = None) -> str:
+    """Merge duplicate PDF annotations and notes into the kept copy.
+
+    Always inspect with find_duplicate_pdfs or dry_run=true first. Applying a
+    merge (dry_run=false) requires Zotero to be closed: unique annotations and
+    notes are moved, tags/collections are merged, and duplicate items are moved
+    to the Zotero trash. Different-language copies are skipped.
+    """
+    try:
+        result = duplicates.merge_duplicate_pdfs(dry_run=dry_run, title=title)
+        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    except sqlite3.OperationalError as e:
+        if "locked" in str(e).lower():
+            return json.dumps({
+                "error": "database_locked",
+                "message": "Zotero database is locked; close Zotero and retry.",
+            }, ensure_ascii=False)
+        raise
 
 
 # ── 入口 ────────────────────────────────────────────────────────

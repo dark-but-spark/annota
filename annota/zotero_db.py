@@ -216,6 +216,78 @@ def list_items(limit: int = 50) -> list[dict]:
         conn.close()
 
 
+def list_pdf_attachments() -> list[dict]:
+    """List PDF attachments with their parent item metadata.
+
+    Used by duplicate detection.  Trashed items are excluded.
+    """
+    conn = _connect(readonly=True)
+    try:
+        rows = conn.execute("""
+            SELECT
+                p.itemID AS parent_item_id,
+                p.dateAdded AS parent_date_added,
+                (
+                    SELECT idv.value
+                    FROM itemData id
+                    JOIN itemDataValues idv ON id.valueID = idv.valueID
+                    WHERE id.itemID = p.itemID
+                        AND id.fieldID = (
+                            SELECT fieldID FROM fields WHERE fieldName = 'title'
+                        )
+                ) AS title,
+                (
+                    SELECT idv.value
+                    FROM itemData id
+                    JOIN itemDataValues idv ON id.valueID = idv.valueID
+                    WHERE id.itemID = p.itemID
+                        AND id.fieldID = (
+                            SELECT fieldID FROM fields WHERE fieldName = 'language'
+                        )
+                ) AS language,
+                a.itemID AS attachment_item_id,
+                a.key AS attachment_key,
+                ia.path,
+                (
+                    SELECT COUNT(*)
+                    FROM itemAnnotations ann
+                    WHERE ann.parentItemID = a.itemID
+                ) AS annotation_count,
+                (
+                    SELECT COUNT(*)
+                    FROM itemNotes note
+                    WHERE note.parentItemID IN (p.itemID, a.itemID)
+                ) AS note_count
+            FROM items p
+            JOIN itemAttachments ia
+                ON ia.parentItemID = p.itemID
+                AND ia.contentType = 'application/pdf'
+            JOIN items a ON a.itemID = ia.itemID
+            WHERE p.libraryID = ?
+                AND p.itemTypeID NOT IN (1, 3, 28)
+                AND p.itemID NOT IN (SELECT itemID FROM deletedItems)
+                AND a.itemID NOT IN (SELECT itemID FROM deletedItems)
+            ORDER BY p.dateAdded, a.itemID
+        """, (LIBRARY_ID,)).fetchall()
+
+        return [
+            {
+                "item_id": row["parent_item_id"],
+                "attachment_id": row["attachment_item_id"],
+                "attachment_key": row["attachment_key"],
+                "path": row["path"],
+                "title": row["title"],
+                "language": row["language"],
+                "parent_date_added": row["parent_date_added"],
+                "annotation_count": row["annotation_count"],
+                "note_count": row["note_count"],
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
 def get_attachment_id_by_key(key: str) -> int | None:
     """通过 Zotero storage key 查找 PDF attachment 的 itemID。
 
@@ -655,6 +727,286 @@ def delete_annotations_batch(annotation_ids: list[int]) -> dict:
         conn.commit()
         logger.info("批量删除标注: 成功=%d, 失败=%d", deleted_count, len(failed))
         return {"deleted_count": deleted_count, "failed": failed}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+# ── Duplicate merging ───────────────────────────────────────────
+
+def _canonical_annotation_position(raw: str | None) -> tuple:
+    try:
+        position = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return (raw,)
+    rects = position.get("rects") or []
+    canonical = []
+    for rect in rects:
+        try:
+            canonical.append(tuple(round(float(value), 1) for value in rect[:4]))
+        except (TypeError, ValueError):
+            canonical.append(tuple(rect))
+    return (position.get("pageIndex"), tuple(canonical))
+
+
+def _annotation_fingerprint(row: sqlite3.Row) -> tuple:
+    return (
+        row["type"],
+        (row["text"] or "").strip(),
+        (row["comment"] or "").strip(),
+        (row["color"] or "").lower(),
+        _canonical_annotation_position(row["position"]),
+    )
+
+
+def _touch_item(cursor: sqlite3.Cursor, item_id: int, now: str) -> None:
+    cursor.execute(
+        """UPDATE items
+           SET dateModified = ?, clientDateModified = ?, synced = 0
+           WHERE itemID = ?""",
+        (now, now, item_id),
+    )
+
+
+def _trash_item(cursor: sqlite3.Cursor, item_id: int, now: str) -> None:
+    cursor.execute("DELETE FROM collectionItems WHERE itemID = ?", (item_id,))
+    cursor.execute(
+        "INSERT OR IGNORE INTO deletedItems (itemID, dateDeleted) VALUES (?, ?)",
+        (item_id, now),
+    )
+    _touch_item(cursor, item_id, now)
+
+
+def _move_annotations(
+    cursor: sqlite3.Cursor,
+    source_attachment_id: int,
+    target_attachment_id: int,
+    existing: set[tuple],
+    now: str,
+) -> tuple[int, int]:
+    rows = cursor.execute(
+        """SELECT itemID, type, text, comment, color, position
+           FROM itemAnnotations
+           WHERE parentItemID = ?""",
+        (source_attachment_id,),
+    ).fetchall()
+
+    moved = 0
+    skipped = 0
+    for row in rows:
+        fingerprint = _annotation_fingerprint(row)
+        if fingerprint in existing:
+            skipped += 1
+            continue
+        cursor.execute(
+            "UPDATE itemAnnotations SET parentItemID = ? WHERE itemID = ?",
+            (target_attachment_id, row["itemID"]),
+        )
+        _touch_item(cursor, row["itemID"], now)
+        existing.add(fingerprint)
+        moved += 1
+    return moved, skipped
+
+
+def _move_notes(
+    cursor: sqlite3.Cursor,
+    source_parent_id: int,
+    target_parent_id: int,
+    now: str,
+) -> int:
+    rows = cursor.execute(
+        "SELECT itemID FROM itemNotes WHERE parentItemID = ?",
+        (source_parent_id,),
+    ).fetchall()
+    for row in rows:
+        cursor.execute(
+            "UPDATE itemNotes SET parentItemID = ? WHERE itemID = ?",
+            (target_parent_id, row["itemID"]),
+        )
+        _touch_item(cursor, row["itemID"], now)
+    return len(rows)
+
+
+def _move_child_attachments(
+    cursor: sqlite3.Cursor,
+    source_parent_id: int,
+    excluded_attachment_id: int,
+    target_parent_id: int,
+    now: str,
+) -> int:
+    rows = cursor.execute(
+        """SELECT itemID FROM itemAttachments
+           WHERE parentItemID = ? AND itemID != ?""",
+        (source_parent_id, excluded_attachment_id),
+    ).fetchall()
+    for row in rows:
+        cursor.execute(
+            "UPDATE itemAttachments SET parentItemID = ? WHERE itemID = ?",
+            (target_parent_id, row["itemID"]),
+        )
+        _touch_item(cursor, row["itemID"], now)
+    return len(rows)
+
+
+def _merge_tags_and_collections(
+    cursor: sqlite3.Cursor,
+    source_item_id: int,
+    target_item_id: int,
+) -> tuple[int, int]:
+    cursor.execute(
+        """INSERT OR IGNORE INTO itemTags (itemID, tagID, type)
+           SELECT ?, tagID, type FROM itemTags WHERE itemID = ?""",
+        (target_item_id, source_item_id),
+    )
+    tags = cursor.rowcount
+    cursor.execute(
+        """INSERT OR IGNORE INTO collectionItems (collectionID, itemID, orderIndex)
+           SELECT collectionID, ?, orderIndex
+           FROM collectionItems WHERE itemID = ?""",
+        (target_item_id, source_item_id),
+    )
+    collections = cursor.rowcount
+    return tags, collections
+
+
+@_retry_on_lock
+def merge_duplicate_group(
+    target_parent_item_id: int,
+    target_attachment_id: int,
+    duplicates: list[dict],
+) -> dict:
+    """Merge duplicate attachments into a kept attachment.
+
+    ``duplicates`` items contain ``item_id`` (parent item) and
+    ``attachment_id`` (the duplicate PDF attachment).  Unique annotations and
+    notes are moved, collection/tag membership is merged, and duplicate items
+    are moved to the Zotero trash.
+    """
+    if not duplicates:
+        return {"target_item_id": target_parent_item_id,
+                "target_attachment_id": target_attachment_id, "merged": []}
+
+    now = _now_iso()
+    conn = _connect()
+    try:
+        cursor = conn.cursor()
+
+        target = cursor.execute(
+            """SELECT ia.itemID, ia.parentItemID
+               FROM itemAttachments ia
+               JOIN items i ON i.itemID = ia.itemID
+               WHERE ia.itemID = ? AND ia.contentType = 'application/pdf'
+                 AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)""",
+            (target_attachment_id,),
+        ).fetchone()
+        if not target:
+            raise ValueError(
+                f"target attachment {target_attachment_id} is not a live PDF attachment"
+            )
+        if target["parentItemID"] != target_parent_item_id:
+            raise ValueError(
+                "target attachment does not belong to the target parent item"
+            )
+
+        existing: set[tuple] = set()
+        for row in cursor.execute(
+            """SELECT type, text, comment, color, position
+               FROM itemAnnotations WHERE parentItemID = ?""",
+            (target_attachment_id,),
+        ).fetchall():
+            existing.add(_annotation_fingerprint(row))
+
+        merged = []
+        for duplicate in duplicates:
+            source_item_id = int(duplicate["item_id"])
+            source_attachment_id = int(duplicate["attachment_id"])
+            if source_attachment_id == target_attachment_id:
+                continue
+
+            source = cursor.execute(
+                """SELECT ia.itemID, ia.parentItemID
+                   FROM itemAttachments ia
+                   JOIN items i ON i.itemID = ia.itemID
+                   WHERE ia.itemID = ? AND ia.contentType = 'application/pdf'
+                     AND ia.itemID NOT IN (SELECT itemID FROM deletedItems)""",
+                (source_attachment_id,),
+            ).fetchone()
+            if not source:
+                merged.append({
+                    "source_item_id": source_item_id,
+                    "source_attachment_id": source_attachment_id,
+                    "skipped": "not a live PDF attachment",
+                })
+                continue
+            if source["parentItemID"] != source_item_id:
+                merged.append({
+                    "source_item_id": source_item_id,
+                    "source_attachment_id": source_attachment_id,
+                    "skipped": "attachment does not belong to the given parent",
+                })
+                continue
+
+            annotations_moved, annotations_skipped = _move_annotations(
+                cursor,
+                source_attachment_id,
+                target_attachment_id,
+                existing,
+                now,
+            )
+            attachment_notes = _move_notes(
+                cursor, source_attachment_id, target_attachment_id, now
+            )
+
+            same_parent = source_item_id == target_parent_item_id
+            child_attachments = 0
+            parent_notes = 0
+            tags_merged = 0
+            collections_merged = 0
+            if not same_parent:
+                child_attachments = _move_child_attachments(
+                    cursor,
+                    source_item_id,
+                    source_attachment_id,
+                    target_parent_item_id,
+                    now,
+                )
+                parent_notes = _move_notes(
+                    cursor, source_item_id, target_parent_item_id, now
+                )
+                tags_merged, collections_merged = _merge_tags_and_collections(
+                    cursor, source_item_id, target_parent_item_id
+                )
+
+            _trash_item(cursor, source_attachment_id, now)
+            if not same_parent:
+                _trash_item(cursor, source_item_id, now)
+
+            merged.append({
+                "source_item_id": source_item_id,
+                "source_attachment_id": source_attachment_id,
+                "annotations_moved": annotations_moved,
+                "annotations_skipped": annotations_skipped,
+                "attachment_notes_moved": attachment_notes,
+                "parent_notes_moved": parent_notes,
+                "child_attachments_moved": child_attachments,
+                "tags_merged": tags_merged,
+                "collections_merged": collections_merged,
+                "trashed": True,
+            })
+
+        conn.commit()
+        logger.info(
+            "Duplicate merge: target item=%d, sources=%d",
+            target_parent_item_id,
+            len(merged),
+        )
+        return {
+            "target_item_id": target_parent_item_id,
+            "target_attachment_id": target_attachment_id,
+            "merged": merged,
+        }
     except Exception:
         conn.rollback()
         raise
