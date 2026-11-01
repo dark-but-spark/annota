@@ -4,6 +4,15 @@ All notable changes to Annota will be documented in this file.
 
 ## [Unreleased]
 
+### Added - Unified Configuration File
+
+- `~/.annota/config.json` stores Zotero paths, database retry settings, Ollama,
+  DeepSeek, and translation options
+- Environment variables override config-file values
+- Added `config.example.json` and `docs/configuration.md`
+- DeepSeek settings saved by the translation CLI now use the nested `deepseek`
+  section; legacy flat keys remain supported
+
 ### Added - Paper Translation
 
 - `translate_paper` MCP tool: translate a paper and save it as a Zotero child

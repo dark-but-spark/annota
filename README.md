@@ -142,6 +142,13 @@ Add to `~/.claude.json` (or via Claude Code Settings > MCP Servers):
 > - **macOS**: Zotero → Settings → Advanced → Data Directory Location (default: `~/Zotero`)
 > - **Linux**: default `~/Zotero`
 
+**Alternative: use a config file**
+
+Instead of `env` entries, copy `config.example.json` to
+`~/.annota/config.json` (Windows: `C:\Users\YourName\.annota\config.json`) and
+edit `zotero.data_dir`. The same file stores Ollama, DeepSeek, and translation
+settings. See [`docs/configuration.md`](docs/configuration.md).
+
 ### Step 3: Use It
 
 Just talk to Claude naturally:

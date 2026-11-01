@@ -1,0 +1,32 @@
+{
+  "zotero": {
+    "data_dir": "C:/Users/yourname/Zotero",
+    "db_path": null,
+    "storage_dir": null,
+    "library_id": 1
+  },
+  "database": {
+    "timeout": 30,
+    "retry_count": 3,
+    "retry_base_delay": 1
+  },
+  "ollama": {
+    "base_url": "http://127.0.0.1:11434",
+    "llm_model": "qwen2.5:7b",
+    "fallback_model": "deepseek-r1:1.5b",
+    "embed_model": "",
+    "timeout": 90,
+    "auto_start": true
+  },
+  "deepseek": {
+    "api_key": "",
+    "base_url": "https://api.deepseek.com",
+    "model": "deepseek-chat",
+    "timeout": 120
+  },
+  "translation": {
+    "provider": "auto",
+    "target_language": "zh-CN",
+    "chunk_chars": 3000
+  }
+}

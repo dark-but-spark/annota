@@ -180,7 +180,11 @@ def _load_user_config() -> dict:
 def _save_user_config(values: dict) -> None:
     path = Path(ANNOTA_USER_CONFIG_PATH)
     data = _load_user_config()
-    data.update(values)
+    for key, value in values.items():
+        if isinstance(value, dict) and isinstance(data.get(key), dict):
+            data[key] = {**data[key], **value}
+        else:
+            data[key] = value
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     try:
@@ -191,14 +195,24 @@ def _save_user_config(values: dict) -> None:
 
 def _deepseek_settings() -> dict:
     config = _load_user_config()
-    api_key = os.environ.get("DEEPSEEK_API_KEY") or config.get("deepseek_api_key", "")
+    section = config.get("deepseek")
+    if not isinstance(section, dict):
+        section = {}
+
+    api_key = (
+        os.environ.get("DEEPSEEK_API_KEY")
+        or section.get("api_key")
+        or config.get("deepseek_api_key", "")
+    )
     base_url = (
         os.environ.get("DEEPSEEK_BASE_URL")
+        or section.get("base_url")
         or config.get("deepseek_base_url")
         or DEEPSEEK_BASE_URL
     ).rstrip("/")
     model = (
         os.environ.get("DEEPSEEK_MODEL")
+        or section.get("model")
         or config.get("deepseek_model")
         or DEEPSEEK_MODEL
     )
@@ -327,9 +341,11 @@ def _prompt_deepseek_provider() -> DeepSeekProvider | None:
     if save.casefold() not in {"n", "no"}:
         _save_user_config(
             {
-                "deepseek_api_key": api_key,
-                "deepseek_base_url": base_url.rstrip("/"),
-                "deepseek_model": model,
+                "deepseek": {
+                    "api_key": api_key,
+                    "base_url": base_url.rstrip("/"),
+                    "model": model,
+                }
             }
         )
         print("Saved DeepSeek settings to ~/.annota/config.json", file=sys.stderr)
