@@ -975,6 +975,7 @@ def translate_paper(
     save_note: bool = True,
     max_chars_per_chunk: int = TRANSLATION_CHUNK_CHARS,
     glossary: dict[str, str] | None = None,
+    formula_placeholders: bool = True,
 ) -> str:
     """翻译论文并保存为 Zotero 子笔记。
 
@@ -989,6 +990,8 @@ def translate_paper(
         save_note: 是否保存为子笔记；false 时直接返回译文
         max_chars_per_chunk: 每次发给模型的字符数上限（默认 3000）
         glossary: 可选术语表 {"英文": "中文"}，强制统一译法
+        formula_placeholders: 是否把公式块替换为占位标记（默认 true，
+            避免公式被翻译成乱码；公式页建议配合 babeldoc_translate.py）
     """
     try:
         pdf_path = _resolve_pdf_path(item_id)
@@ -1011,6 +1014,7 @@ def translate_paper(
             target_language=target_language,
             max_chars_per_chunk=max_chars_per_chunk,
             glossary=glossary,
+            formula_placeholders=formula_placeholders,
             allow_prompt=False,
         )
 
@@ -1025,9 +1029,15 @@ def translate_paper(
             "target_language": result["target_language"],
             "page_count": result["page_count"],
             "chunk_count": result["chunk_count"],
+            "formula_count": result.get("formula_count", 0),
             "note_item_id": note["itemID"],
             "note_key": note["key"],
             "message": "翻译已保存为子笔记。请重启 Zotero 或按 Ctrl+Shift+R 刷新查看。",
+            "hint": (
+                "检测到公式块，已用 [公式 p页码-序号] 占位；"
+                "公式页建议运行 babeldoc_translate.py 生成保留公式的 PDF。"
+                if result.get("formula_count") else None
+            ),
         }, ensure_ascii=False)
     except translation.TranslationUnavailableError as exc:
         return json.dumps({

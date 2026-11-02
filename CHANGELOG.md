@@ -11,6 +11,8 @@ All notable changes to Annota will be documented in this file.
 - System prompt preserves author/personal/organization names in Latin script
 - CSV glossary support (`source,target[,tgt_lng]`) via tool `glossary`,
   CLI `--glossary`, or `translation.glossary_file`
+- Formula-aware extraction: display formula blocks are detected by math fonts
+  and replaced with `[公式 p页码-序号]` markers instead of garbled glyph text
 - Added `babeldoc_translate.py` companion for formula-heavy papers; BabelDOC
   preserves equations/layout in a translated PDF
 - Documented a BabelDOC trial on Li (2026) pages 1–5 with DeepSeek

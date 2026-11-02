@@ -24,10 +24,13 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+import fitz  # PyMuPDF
 
 from . import ollama_client, pdf_tools, zotero_db
 from .config import (
@@ -184,7 +187,8 @@ def _system_prompt(
         "Translate personal names to their conventional form only when an "
         "official Chinese name is well known; otherwise keep the original. "
         "Do not summarize, explain, or add commentary. Output only the "
-        "translation."
+        "translation. Keep placeholder tokens such as ⟦EQ_p3_1⟧ exactly "
+        "unchanged; never translate, reorder, or remove them."
     )
     if glossary:
         pairs = "; ".join(
@@ -491,6 +495,184 @@ def _split_long_unit(text: str, max_chars: int) -> list[str]:
     return parts or [text[:max_chars]]
 
 
+_MATH_FONTS = (
+    "EuclidMath",
+    "Symbol",
+    "CMMI",
+    "CMSY",
+    "MSAM",
+    "MSBM",
+    "MTMI",
+    "MTSY",
+    "STIXMath",
+    "CambriaMath",
+    "AsanaMath",
+    "XITSMath",
+    "LatinModernMath",
+)
+_MATH_CHARS = set("+−=<>≤≥±×÷∑∫√∞≈≠∂∇∆∈∉⊂⊃∪∩→←↔·∙∗")
+_FORMULA_MARKER_RE = re.compile(r"⟦EQ_p(\d+)_(\d+)⟧")
+
+
+def _is_formula_block(block: dict) -> bool:
+    fonts = [span["font"] for line in block["lines"] for span in line["spans"]]
+    text = "".join(
+        span["text"] for line in block["lines"] for span in line["spans"]
+    ).strip()
+    if len(text) < 2:
+        return False
+    math_font = any(
+        any(name in font for name in _MATH_FONTS) for font in fonts
+    )
+    math_chars = sum(
+        1
+        for char in text
+        if char in _MATH_CHARS or unicodedata.category(char) == "Sm"
+    )
+    ratio = math_chars / len(text)
+    return bool((math_font and (ratio >= 0.04 or len(text) <= 120)) or ratio >= 0.2)
+
+
+def _is_equation_number(block: dict) -> bool:
+    text = "".join(
+        span["text"] for line in block["lines"] for span in line["spans"]
+    ).strip()
+    return bool(re.fullmatch(r"\(\d+\)", text))
+
+
+def _merge_formula_regions(blocks: list[dict]) -> list["fitz.Rect"]:
+    regions = []
+    for block in blocks:
+        box = fitz.Rect(block["bbox"])
+        box = fitz.Rect(box.x0 - 10, box.y0 - 6, box.x1 + 10, box.y1 + 20)
+        merged = False
+        for region in regions:
+            horizontally_close = not (box.x1 < region.x0 or box.x0 > region.x1)
+            vertically_close = (
+                box.y0 <= region.y1 + 12 and region.y0 <= box.y1 + 12
+            )
+            if region.intersects(box) or (horizontally_close and vertically_close):
+                region |= box
+                merged = True
+                break
+        if not merged:
+            regions.append(box)
+
+    changed = True
+    while changed:
+        changed = False
+        for index in range(len(regions)):
+            for other in range(index + 1, len(regions)):
+                if regions[index].intersects(regions[other]):
+                    regions[index] |= regions.pop(other)
+                    changed = True
+                    break
+            if changed:
+                break
+    return regions
+
+
+def _extract_pages_with_formulas(
+    pdf_path: str | Path,
+    pages: list[int] | None = None,
+    skip_refs: bool = True,
+) -> tuple[list[dict], list[dict]]:
+    """Extract page text and replace formula blocks with stable markers."""
+    doc = fitz.open(str(pdf_path))
+    try:
+        total_pages = len(doc)
+        refs_start = pdf_tools._detect_refs_page(doc) if skip_refs else total_pages
+        if pages is None:
+            target_pages = list(range(min(refs_start, total_pages)))
+        else:
+            target_pages = sorted(
+                {
+                    page
+                    for page in pages
+                    if 0 <= page < total_pages and page < refs_start
+                }
+            )
+
+        page_texts = []
+        formulas = []
+        for page_number in target_pages:
+            page = doc[page_number]
+            blocks = [
+                block
+                for block in page.get_text("dict")["blocks"]
+                if block.get("type") == 0
+            ]
+            formula_blocks = [block for block in blocks if _is_formula_block(block)]
+            if not formula_blocks:
+                page_texts.append({
+                    "page": page_number,
+                    "text": page.get_text("text").strip(),
+                })
+                continue
+
+            regions = _merge_formula_regions(formula_blocks)
+            markers: dict[int, str] = {}
+            pieces = []
+            emitted: set[int] = set()
+            page_formula_count = 0
+
+            for block in blocks:
+                text = "".join(
+                    span["text"]
+                    for line in block["lines"]
+                    for span in line["spans"]
+                ).strip()
+                block_box = fitz.Rect(block["bbox"])
+                region_index = next(
+                    (
+                        index
+                        for index, region in enumerate(regions)
+                        if region.intersects(block_box)
+                    ),
+                    None,
+                )
+                short_fragment = region_index is not None and len(text) <= 40
+                if (
+                    _is_formula_block(block)
+                    or _is_equation_number(block)
+                    or short_fragment
+                ):
+                    if region_index is None:
+                        region_index = len(regions)
+                        regions.append(block_box)
+                    if region_index not in markers:
+                        page_formula_count += 1
+                        marker = (
+                            f"⟦EQ_p{page_number + 1}_{page_formula_count}⟧"
+                        )
+                        markers[region_index] = marker
+                        region = regions[region_index]
+                        formulas.append({
+                            "page": page_number,
+                            "marker": marker,
+                            "bbox": [
+                                round(region.x0, 1),
+                                round(region.y0, 1),
+                                round(region.x1, 1),
+                                round(region.y1, 1),
+                            ],
+                        })
+                    if region_index not in emitted:
+                        pieces.append(markers[region_index])
+                        emitted.add(region_index)
+                    continue
+                if text:
+                    pieces.append(text)
+
+            page_texts.append({
+                "page": page_number,
+                "text": "\n\n".join(pieces).strip(),
+            })
+        return page_texts, formulas
+    finally:
+        doc.close()
+
+
 def _split_text(text: str, max_chars: int) -> list[str]:
     """Pack sentences into chunks without cutting words or sentences."""
     text = text.strip()
@@ -557,6 +739,7 @@ def translate_pdf(
     max_chars_per_chunk: int = TRANSLATION_CHUNK_CHARS,
     glossary: dict[str, str] | None = None,
     glossary_file: str | Path | None = None,
+    formula_placeholders: bool = True,
     allow_prompt: bool = True,
     progress=None,
 ) -> dict:
@@ -574,12 +757,18 @@ def translate_pdf(
     system_prompt = _system_prompt(target_language, merged_glossary or None)
 
     providers = available_providers(allow_prompt=allow_prompt)
-    extracted = pdf_tools.extract_bulk_text(
-        pdf_path,
-        pages=pages,
-        skip_refs=True,
-    )
-    page_texts = extracted.get("pages", [])
+    formulas: list[dict] = []
+    if formula_placeholders:
+        page_texts, formulas = _extract_pages_with_formulas(
+            pdf_path, pages=pages, skip_refs=True
+        )
+    else:
+        extracted = pdf_tools.extract_bulk_text(
+            pdf_path,
+            pages=pages,
+            skip_refs=True,
+        )
+        page_texts = extracted.get("pages", [])
     if not any((page.get("text") or "").strip() for page in page_texts):
         raise TranslationError(
             "No extractable text was found in this PDF. It may be a scanned "
@@ -627,6 +816,8 @@ def translate_pdf(
         "page_count": len(page_texts),
         "chunk_count": len(chunks),
         "glossary_terms": len(merged_glossary),
+        "formula_count": len(formulas),
+        "formulas": formulas,
         "pages": translated,
     }
 
@@ -656,9 +847,19 @@ def render_translation_note(title: str, result: dict) -> str:
             f" / {html.escape(result['model'])}</p>"
         ),
     ]
+    if result.get("formula_count"):
+        parts.append(
+            "<p><strong>提示：</strong>本页含公式。公式未由文本翻译器翻译，"
+            "已标记为 <code>[公式 p页码-序号]</code>；"
+            "建议用 <code>babeldoc_translate.py</code> 生成保留公式的 PDF 对照。</p>"
+        )
     for page_number in sorted(grouped):
         parts.append(f"<h2>第 {page_number + 1} 页</h2>")
         for chunk in grouped[page_number]:
+            chunk = _FORMULA_MARKER_RE.sub(
+                lambda match: f"[公式 p{match.group(1)}-{match.group(2)}]",
+                chunk,
+            )
             parts.append(_html_paragraphs(chunk))
     return "\n".join(parts)
 

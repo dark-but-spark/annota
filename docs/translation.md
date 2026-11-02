@@ -88,6 +88,10 @@ permissions; environment variables always take precedence.
   at a chunk edge.
 - The system prompt keeps author names, personal names, and organization names
   in their original Latin script instead of inventing Chinese names.
+- Display formula blocks are detected by math fonts and replaced with stable
+  markers such as `⟦EQ_p3_1⟧`. The saved note renders them as
+  `[公式 p3-1]` instead of sending broken glyph fragments to the model.
+  Inline formulas in prose are not yet protected; use BabelDOC for those pages.
 - A glossary CSV can enforce terminology across the whole paper:
 
   ```csv

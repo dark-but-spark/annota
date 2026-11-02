@@ -101,6 +101,11 @@ def main() -> None:
         "--glossary",
         help="CSV glossary with source,target[,tgt_lng] columns",
     )
+    parser.add_argument(
+        "--no-formula-placeholders",
+        action="store_true",
+        help="translate formula blocks instead of marking them",
+    )
     parser.add_argument("--json", action="store_true", help="print raw JSON")
     args = parser.parse_args()
 
@@ -127,6 +132,7 @@ def main() -> None:
         target_language=args.target,
         max_chars_per_chunk=args.chunk_chars,
         glossary_file=args.glossary,
+        formula_placeholders=not args.no_formula_placeholders,
         allow_prompt=True,
         progress=progress,
     )
