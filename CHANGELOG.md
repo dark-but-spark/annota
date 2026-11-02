@@ -4,6 +4,17 @@ All notable changes to Annota will be documented in this file.
 
 ## [Unreleased]
 
+### Improved - Translation Quality
+
+- Chunking now packs sentences/paragraphs instead of cutting at character
+  offsets; long sentences split only at word boundaries
+- System prompt preserves author/personal/organization names in Latin script
+- CSV glossary support (`source,target[,tgt_lng]`) via tool `glossary`,
+  CLI `--glossary`, or `translation.glossary_file`
+- Added `babeldoc_translate.py` companion for formula-heavy papers; BabelDOC
+  preserves equations/layout in a translated PDF
+- Documented a BabelDOC trial on Li (2026) pages 1–5 with DeepSeek
+
 ### Added - Unified Configuration File
 
 - `~/.annota/config.json` stores Zotero paths, database retry settings, Ollama,
