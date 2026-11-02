@@ -97,6 +97,10 @@ def main() -> None:
         default=3000,
         help="maximum characters per model request",
     )
+    parser.add_argument(
+        "--glossary",
+        help="CSV glossary with source,target[,tgt_lng] columns",
+    )
     parser.add_argument("--json", action="store_true", help="print raw JSON")
     args = parser.parse_args()
 
@@ -122,6 +126,7 @@ def main() -> None:
         pages=_parse_pages(args.pages),
         target_language=args.target,
         max_chars_per_chunk=args.chunk_chars,
+        glossary_file=args.glossary,
         allow_prompt=True,
         progress=progress,
     )

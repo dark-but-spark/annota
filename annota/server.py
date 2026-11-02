@@ -974,6 +974,7 @@ def translate_paper(
     target_language: str = TRANSLATION_TARGET_LANGUAGE,
     save_note: bool = True,
     max_chars_per_chunk: int = TRANSLATION_CHUNK_CHARS,
+    glossary: dict[str, str] | None = None,
 ) -> str:
     """翻译论文并保存为 Zotero 子笔记。
 
@@ -987,6 +988,7 @@ def translate_paper(
         target_language: 目标语言（默认 zh-CN）
         save_note: 是否保存为子笔记；false 时直接返回译文
         max_chars_per_chunk: 每次发给模型的字符数上限（默认 3000）
+        glossary: 可选术语表 {"英文": "中文"}，强制统一译法
     """
     try:
         pdf_path = _resolve_pdf_path(item_id)
@@ -1008,6 +1010,7 @@ def translate_paper(
             pages=pages or None,
             target_language=target_language,
             max_chars_per_chunk=max_chars_per_chunk,
+            glossary=glossary,
             allow_prompt=False,
         )
 

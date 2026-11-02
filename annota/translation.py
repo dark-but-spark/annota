@@ -39,6 +39,7 @@ from .config import (
     OLLAMA_LLM_FALLBACK_MODEL,
     OLLAMA_LLM_MODEL,
     TRANSLATION_CHUNK_CHARS,
+    TRANSLATION_GLOSSARY_FILE,
     TRANSLATION_PROVIDER,
     TRANSLATION_TARGET_LANGUAGE,
 )
@@ -74,11 +75,17 @@ class OllamaProvider:
     model: str
     kind: str = "ollama"
 
-    def translate(self, text: str, target_language: str, page_number: int) -> str:
+    def translate(
+        self,
+        text: str,
+        target_language: str,
+        page_number: int,
+        system_prompt: str | None = None,
+    ) -> str:
         return ollama_client.generate(
             self.model,
             _user_prompt(text, page_number),
-            system=_system_prompt(target_language),
+            system=system_prompt or _system_prompt(target_language),
             temperature=0.2,
         )
 
@@ -93,11 +100,20 @@ class DeepSeekProvider:
     base_url: str
     kind: str = "deepseek"
 
-    def translate(self, text: str, target_language: str, page_number: int) -> str:
+    def translate(
+        self,
+        text: str,
+        target_language: str,
+        page_number: int,
+        system_prompt: str | None = None,
+    ) -> str:
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": _system_prompt(target_language)},
+                {
+                    "role": "system",
+                    "content": system_prompt or _system_prompt(target_language),
+                },
                 {"role": "user", "content": _user_prompt(text, page_number)},
             ],
             "temperature": 0.2,
@@ -154,14 +170,54 @@ class DeepSeekProvider:
         return {"provider": self.kind, "model": self.model}
 
 
-def _system_prompt(target_language: str) -> str:
+def _system_prompt(
+    target_language: str,
+    glossary: dict[str, str] | None = None,
+) -> str:
     target = _TARGET_NAMES.get(target_language.casefold(), target_language)
-    return (
+    prompt = (
         "You are a professional academic translator. Translate the supplied "
         f"paper excerpt into {target}. Preserve technical terminology, "
-        "citations, numbers, equations, and paragraph structure. Do not "
-        "summarize, explain, or add commentary. Output only the translation."
+        "citations, numbers, equations, and paragraph structure. Keep author "
+        "names, personal names, and organization names in their original "
+        "Latin script; never transliterate them or invent Chinese names. "
+        "Translate personal names to their conventional form only when an "
+        "official Chinese name is well known; otherwise keep the original. "
+        "Do not summarize, explain, or add commentary. Output only the "
+        "translation."
     )
+    if glossary:
+        pairs = "; ".join(
+            f"{source} => {target_term}"
+            for source, target_term in list(glossary.items())[:80]
+        )
+        prompt += (
+            " Use the following terminology consistently and do not choose "
+            f"alternative translations: {pairs}."
+        )
+    return prompt
+
+
+def load_glossary(path: str | Path) -> dict[str, str]:
+    """Load a CSV glossary with ``source,target[,tgt_lng]`` columns."""
+    import csv
+
+    glossary: dict[str, str] = {}
+    with Path(path).open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames:
+            return glossary
+        fields = {name.strip().lower(): name for name in reader.fieldnames}
+        source_key = fields.get("source")
+        target_key = fields.get("target")
+        if not source_key or not target_key:
+            raise ValueError("Glossary CSV must contain source and target columns")
+        for row in reader:
+            source = (row.get(source_key) or "").strip()
+            target = (row.get(target_key) or "").strip()
+            if source and target:
+                glossary[source] = target
+    return glossary
 
 
 def _user_prompt(text: str, page_number: int) -> str:
@@ -406,30 +462,76 @@ def provider_status() -> dict:
     }
 
 
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?。！？])\s+")
+
+
+def _split_long_unit(text: str, max_chars: int) -> list[str]:
+    """Split a too-long sentence at word boundaries, never mid-word."""
+    parts: list[str] = []
+    current = ""
+    for word in text.split():
+        if len(word) > max_chars:
+            if current:
+                parts.append(current)
+                current = ""
+            parts.extend(
+                word[start:start + max_chars]
+                for start in range(0, len(word), max_chars)
+            )
+            continue
+        candidate = f"{current} {word}".strip() if current else word
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            if current:
+                parts.append(current)
+            current = word
+    if current:
+        parts.append(current)
+    return parts or [text[:max_chars]]
+
+
 def _split_text(text: str, max_chars: int) -> list[str]:
+    """Pack sentences into chunks without cutting words or sentences."""
     text = text.strip()
     if len(text) <= max_chars:
         return [text]
 
-    parts: list[str] = []
-    current = ""
+    units: list[tuple[str, bool]] = []
     for paragraph in re.split(r"\n\s*\n", text):
         paragraph = paragraph.strip()
         if not paragraph:
             continue
-        if len(paragraph) > max_chars:
+        sentences = [
+            sentence.strip()
+            for sentence in _SENTENCE_SPLIT.split(paragraph)
+            if sentence.strip()
+        ]
+        if not sentences:
+            sentences = [paragraph]
+        for index, sentence in enumerate(sentences):
+            if len(sentence) > max_chars:
+                pieces = _split_long_unit(sentence, max_chars)
+                for piece_index, piece in enumerate(pieces):
+                    units.append((piece, index == 0 and piece_index == 0))
+            else:
+                units.append((sentence, index == 0))
+
+    parts: list[str] = []
+    current = ""
+    for unit, starts_paragraph in units:
+        if not current:
+            candidate = unit
+        elif starts_paragraph:
+            candidate = f"{current}\n\n{unit}"
+        else:
+            candidate = f"{current} {unit}"
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
             if current:
                 parts.append(current)
-                current = ""
-            for start in range(0, len(paragraph), max_chars):
-                parts.append(paragraph[start:start + max_chars])
-            continue
-        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
-        if len(candidate) > max_chars:
-            parts.append(current)
-            current = paragraph
-        else:
-            current = candidate
+            current = unit
     if current:
         parts.append(current)
     return parts
@@ -453,12 +555,23 @@ def translate_pdf(
     pages: list[int] | None = None,
     target_language: str = TRANSLATION_TARGET_LANGUAGE,
     max_chars_per_chunk: int = TRANSLATION_CHUNK_CHARS,
+    glossary: dict[str, str] | None = None,
+    glossary_file: str | Path | None = None,
     allow_prompt: bool = True,
     progress=None,
 ) -> dict:
     """Extract and translate a PDF, returning translated chunks by page."""
     if max_chars_per_chunk < 500:
         raise ValueError("max_chars_per_chunk must be at least 500")
+
+    merged_glossary: dict[str, str] = {}
+    if glossary_file is None and TRANSLATION_GLOSSARY_FILE:
+        glossary_file = TRANSLATION_GLOSSARY_FILE
+    if glossary_file:
+        merged_glossary.update(load_glossary(glossary_file))
+    if glossary:
+        merged_glossary.update(glossary)
+    system_prompt = _system_prompt(target_language, merged_glossary or None)
 
     providers = available_providers(allow_prompt=allow_prompt)
     extracted = pdf_tools.extract_bulk_text(
@@ -487,7 +600,10 @@ def translate_pdf(
         for provider in providers:
             try:
                 output = provider.translate(
-                    chunk["text"], target_language, chunk["page"]
+                    chunk["text"],
+                    target_language,
+                    chunk["page"],
+                    system_prompt=system_prompt,
                 )
                 used_provider = provider
                 break
@@ -510,6 +626,7 @@ def translate_pdf(
         "target_language": target_language,
         "page_count": len(page_texts),
         "chunk_count": len(chunks),
+        "glossary_terms": len(merged_glossary),
         "pages": translated,
     }
 

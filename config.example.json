@@ -27,6 +27,7 @@
   "translation": {
     "provider": "auto",
     "target_language": "zh-CN",
-    "chunk_chars": 3000
+    "chunk_chars": 3000,
+    "glossary_file": ""
   }
 }

@@ -51,7 +51,8 @@ another setting".
   "translation": {
     "provider": "auto",
     "target_language": "zh-CN",
-    "chunk_chars": 3000
+    "chunk_chars": 3000,
+    "glossary_file": ""
   }
 }
 ```
@@ -105,6 +106,7 @@ asks for these DeepSeek values and can save them to this file automatically.
 | `provider` | `auto` | `ANNOTA_TRANSLATION_PROVIDER` | `auto`, `local`/`ollama`, or `deepseek` |
 | `target_language` | `zh-CN` | `ANNOTA_TRANSLATION_TARGET` | Translation target |
 | `chunk_chars` | `3000` | `ANNOTA_TRANSLATION_CHUNK_CHARS` | Maximum characters per model request |
+| `glossary_file` | `""` | `ANNOTA_GLOSSARY_FILE` | Optional CSV glossary (`source,target[,tgt_lng]`) |
 
 `auto` tries local Ollama first, then DeepSeek. `local` disables the API
 fallback. `deepseek` skips the local model.

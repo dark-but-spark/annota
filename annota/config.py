@@ -186,6 +186,9 @@ TRANSLATION_PROVIDER = str(
         "ANNOTA_TRANSLATION_PROVIDER", "translation", "provider", "auto"
     )
 ).lower()
+TRANSLATION_GLOSSARY_FILE = str(
+    _setting("ANNOTA_GLOSSARY_FILE", "translation", "glossary_file", "")
+)
 
 DEEPSEEK_API_KEY = str(
     _setting("DEEPSEEK_API_KEY", "deepseek", "api_key", "")
