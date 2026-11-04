@@ -13,6 +13,9 @@ All notable changes to Annota will be documented in this file.
   CLI `--glossary`, or `translation.glossary_file`
 - Formula-aware extraction: display formula blocks are detected by math fonts
   and replaced with `[公式 p页码-序号]` markers instead of garbled glyph text
+- Full-paper translation: `pages=None` translates every page; `output_path`
+  and CLI `--output` write the complete Markdown/JSON, not just one page
+- `skip_refs` / `--include-references` control reference-page translation
 - Added `babeldoc_translate.py` companion for formula-heavy papers; BabelDOC
   preserves equations/layout in a translated PDF
 - Documented a BabelDOC trial on Li (2026) pages 1–5 with DeepSeek

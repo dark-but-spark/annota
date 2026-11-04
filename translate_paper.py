@@ -106,6 +106,15 @@ def main() -> None:
         action="store_true",
         help="translate formula blocks instead of marking them",
     )
+    parser.add_argument(
+        "--include-references",
+        action="store_true",
+        help="also translate the references section",
+    )
+    parser.add_argument(
+        "--output",
+        help="write the full Markdown (or JSON with --json) to this path",
+    )
     parser.add_argument("--json", action="store_true", help="print raw JSON")
     args = parser.parse_args()
 
@@ -133,12 +142,29 @@ def main() -> None:
         max_chars_per_chunk=args.chunk_chars,
         glossary_file=args.glossary,
         formula_placeholders=not args.no_formula_placeholders,
+        skip_refs=not args.include_references,
         allow_prompt=True,
         progress=progress,
     )
 
+    if args.output:
+        output = Path(args.output).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        if args.json:
+            output.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        else:
+            title = (metadata or {}).get("title") or Path(
+                args.pdf or args.item or "paper"
+            ).stem
+            translation.write_translation_markdown(title, result, output)
+        print(f"Full translation written to {output}")
+
     if args.json:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        if not args.output:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
         return
 
     if args.no_note:

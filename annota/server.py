@@ -976,6 +976,8 @@ def translate_paper(
     max_chars_per_chunk: int = TRANSLATION_CHUNK_CHARS,
     glossary: dict[str, str] | None = None,
     formula_placeholders: bool = True,
+    skip_refs: bool = True,
+    output_path: str | None = None,
 ) -> str:
     """翻译论文并保存为 Zotero 子笔记。
 
@@ -992,6 +994,8 @@ def translate_paper(
         glossary: 可选术语表 {"英文": "中文"}，强制统一译法
         formula_placeholders: 是否把公式块替换为占位标记（默认 true，
             避免公式被翻译成乱码；公式页建议配合 babeldoc_translate.py）
+        skip_refs: 是否跳过参考文献页（默认 true）
+        output_path: 可选，写入全篇 Markdown 的路径；不传则只保存 Zotero 子笔记
     """
     try:
         pdf_path = _resolve_pdf_path(item_id)
@@ -1007,6 +1011,12 @@ def translate_paper(
                 }, ensure_ascii=False)
             parent_item_id = metadata["itemID"]
             title = metadata.get("title", "")
+        elif output_path:
+            try:
+                metadata = zotero_db.get_item_metadata(_resolve_item_id(item_id))
+                title = metadata.get("title") or Path(pdf_path).stem
+            except Exception:
+                title = Path(pdf_path).stem
 
         result = translation.translate_pdf(
             pdf_path,
@@ -1015,11 +1025,21 @@ def translate_paper(
             max_chars_per_chunk=max_chars_per_chunk,
             glossary=glossary,
             formula_placeholders=formula_placeholders,
+            skip_refs=skip_refs,
             allow_prompt=False,
         )
 
+        written_path = None
+        if output_path:
+            written_path = translation.write_translation_markdown(
+                title, result, output_path
+            )
+
         if not save_note:
-            return json.dumps(result, ensure_ascii=False)
+            payload = dict(result)
+            if written_path:
+                payload["output_path"] = str(written_path)
+            return json.dumps(payload, ensure_ascii=False)
 
         note = translation.save_translation_note(parent_item_id, title, result)
         return json.dumps({
@@ -1032,6 +1052,7 @@ def translate_paper(
             "formula_count": result.get("formula_count", 0),
             "note_item_id": note["itemID"],
             "note_key": note["key"],
+            "output_path": str(written_path) if written_path else None,
             "message": "翻译已保存为子笔记。请重启 Zotero 或按 Ctrl+Shift+R 刷新查看。",
             "hint": (
                 "检测到公式块，已用 [公式 p页码-序号] 占位；"

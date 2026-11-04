@@ -80,7 +80,7 @@ AI reads your papers, highlights key findings, explains formulas, and writes str
 - **Duplicate cleanup** 🆕 — Finds byte-identical PDFs under the same title and merges annotations/notes into the kept copy. Different-language copies are skipped.
 - **Collection-aware search** 🆕 — Search results include Zotero folder paths, and searches can be scoped to a folder.
 - **Safe writes** 🆕 — Detects a running Zotero process and SQLite lock before writing, with a clear "close Zotero" message instead of a timeout.
-- **Paper translation** 🆕 — Translates papers with a local Ollama model first, falls back to the DeepSeek API, and saves the result as a child note. Sentence-aware chunking, CSV glossaries, and formula placeholders improve consistency.
+- **Paper translation** 🆕 — Translates the full paper by default with a local Ollama model first, falls back to the DeepSeek API, and saves the result as a child note or full Markdown file. Sentence-aware chunking, CSV glossaries, and formula placeholders improve consistency.
 - **Formula-safe PDF translation** 🆕 — `babeldoc_translate.py` wraps BabelDOC for formula-heavy papers, preserving equations and layout in a translated PDF.
 - **Friendly errors** — Write failures return helpful messages instead of crashing.
 

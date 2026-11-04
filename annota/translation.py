@@ -740,6 +740,7 @@ def translate_pdf(
     glossary: dict[str, str] | None = None,
     glossary_file: str | Path | None = None,
     formula_placeholders: bool = True,
+    skip_refs: bool = True,
     allow_prompt: bool = True,
     progress=None,
 ) -> dict:
@@ -760,13 +761,13 @@ def translate_pdf(
     formulas: list[dict] = []
     if formula_placeholders:
         page_texts, formulas = _extract_pages_with_formulas(
-            pdf_path, pages=pages, skip_refs=True
+            pdf_path, pages=pages, skip_refs=skip_refs
         )
     else:
         extracted = pdf_tools.extract_bulk_text(
             pdf_path,
             pages=pages,
-            skip_refs=True,
+            skip_refs=skip_refs,
         )
         page_texts = extracted.get("pages", [])
     if not any((page.get("text") or "").strip() for page in page_texts):
@@ -862,6 +863,51 @@ def render_translation_note(title: str, result: dict) -> str:
             )
             parts.append(_html_paragraphs(chunk))
     return "\n".join(parts)
+
+
+def render_translation_markdown(title: str, result: dict) -> str:
+    """Render the full translated paper as Markdown."""
+    grouped: dict[int, list[str]] = {}
+    for item in result["pages"]:
+        grouped.setdefault(item["page"], []).append(item["translation"])
+
+    lines = [
+        f"# 翻译：{title or '未命名论文'}",
+        "",
+        f"> 目标语言：{result['target_language']}；"
+        f"翻译服务：{result['provider']} / {result['model']}；"
+        f"页数：{result['page_count']}；公式块：{result.get('formula_count', 0)}",
+        "",
+    ]
+    if result.get("formula_count"):
+        lines.extend([
+            "> 公式块已标记为 `[公式 p页码-序号]`。"
+            "公式页建议用 `babeldoc_translate.py` 生成保留公式的 PDF。",
+            "",
+        ])
+    for page_number in sorted(grouped):
+        lines.extend([f"## 第 {page_number + 1} 页", ""])
+        for chunk in grouped[page_number]:
+            chunk = _FORMULA_MARKER_RE.sub(
+                lambda match: f"[公式 p{match.group(1)}-{match.group(2)}]",
+                chunk,
+            )
+            lines.extend([chunk.strip(), ""])
+    return "\n".join(lines).strip() + "\n"
+
+
+def write_translation_markdown(
+    title: str,
+    result: dict,
+    output_path: str | Path,
+) -> Path:
+    """Write the full translated paper to a Markdown file."""
+    path = Path(output_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        render_translation_markdown(title, result), encoding="utf-8"
+    )
+    return path
 
 
 def save_translation_note(parent_item_id: int, title: str, result: dict) -> dict:

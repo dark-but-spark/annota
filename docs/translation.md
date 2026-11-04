@@ -40,15 +40,20 @@ tried for that chunk.
 ```text
 translation_status()
 translate_paper(item_id, pages=None, target_language="zh-CN",
-                save_note=True, max_chars_per_chunk=3000, glossary=None)
+                save_note=True, max_chars_per_chunk=3000, glossary=None,
+                formula_placeholders=True, skip_refs=True, output_path=None)
 ```
 
 - `translation_status` is read-only and does not start Ollama or prompt.
 - `translate_paper` extracts text (skipping references), splits it into chunks,
   translates each chunk, and saves an HTML child note with page headings.
-- `save_note=false` returns the translation instead of writing a note.
+- `save_note=false` returns the full translation instead of writing a note.
+- `output_path` writes the complete paper as Markdown and returns the path.
 - Saving a note requires Zotero to be closed. The tool checks the database lock
   before spending model/API time.
+- **Full paper is the default:** omit `pages` to translate every page (the
+  references section is skipped unless `skip_refs=false`). `pages` is only for
+  partial translation.
 
 Example:
 
@@ -67,6 +72,9 @@ python translate_paper.py --item 12345
 # Only the first three pages, into English
 python translate_paper.py --item 12345 --pages 0,1,2 --target en
 
+# Translate the whole paper and write a Markdown file
+python translate_paper.py --pdf paper.pdf --no-note --output paper.zh.md
+
 # Translate a plain PDF and print the result
 python translate_paper.py --pdf paper.pdf --no-note
 
@@ -80,6 +88,10 @@ python -c "from annota.translation import provider_status; print(provider_status
 On the first run without a local model and without a DeepSeek key, the CLI asks
 for the API settings. Saving writes to `~/.annota/config.json` with restrictive
 permissions; environment variables always take precedence.
+
+Without `--pages`, the CLI translates the whole paper. Use
+`--include-references` to translate references too, and `--output` to write the
+full Markdown instead of only printing it.
 
 ## Chunking and terminology
 
